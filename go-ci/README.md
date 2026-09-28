@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: schuettc/tools-actions/go-ci@v0.2.0
+      - uses: schuettc/tools-actions/go-ci@v0.2.1
 ```
 
 Inputs: `packages` (default `./...`), `race`, `targets`, `lint`, `setup-go`, `go-version-file`.
