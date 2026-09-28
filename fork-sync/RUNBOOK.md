@@ -15,7 +15,25 @@ situation, with the trigger, the steps, and how you know it worked.
 | `schuettc/pi-claude-bridge` | `~/GitHub/worktrees/pi-claude-bridge-current` (**`origin` = upstream elidickinson**, `schuettc` = fork, `karrq`) | `elidickinson/pi-claude-bridge@main` | `.` | `v` | 09:17 |
 | `schuettc/pi-packages` → `@schuettc/pi-auto-review` | `~/GitHub/schuettc/pi-packages` (`origin` = fork, `upstream`) | `erichll/pi-packages@main` | `packages/pi-auto-review` | `pi-auto-review-v` | 09:23 |
 | `schuettc/pi-schedule` | `tools-workspace/pi-schedule` (`origin` = fork, `upstream`) | `pungggi/pi-schedule@master` | `.` | `v` | 09:29 |
+| `schuettc/pi-permission-system` | `tools-workspace/pi-permission-system` (`origin` = fork, `upstream`) | `gotgenes/pi-packages@main` | `packages/pi-permission-system` | `pi-permission-system-v` | 09:35 |
 | `schuettc/pi-usage` | none kept; clone fresh (see below) | `Sreetej510/pi-extensions@master` | `extensions/pi-usage` | `pi-usage-v` | 09:41 |
+
+Each fork's package is `@schuettc/<fork name>`, except `pi-packages`, which
+publishes `@schuettc/pi-auto-review`. The fleet list is tools-ops'
+`templates/fork-sync/forks.tsv`.
+
+> **Upstream-owned `dependabot.yml`: `pi-permission-system` keeps Dependabot
+> disabled.** Overwriting an upstream-owned `.github/dependabot.yml` would put
+> a standing conflict into every rebase, but upstream's file isn't scoped the
+> way ours is: it has no `allow` restricting it to our `schuettc/tools-actions`
+> pin, so enabling Dependabot version updates on this fork (Settings → Code
+> security) would also open PRs bumping upstream's own workflows — the same
+> fork-patch-per-bump problem the `allow` restriction on our own
+> `dependabot.yml` exists to avoid. Leave Dependabot **off** for this fork
+> (forks have it off by default; never click "Enable"). Instead, bump its
+> `schuettc/tools-actions/fork-sync@vX.Y.Z` pin by hand whenever `muda check
+> fork-sync` warns it's stale, the same way you would for an urgent fix on any
+> other fork (see "changing the standard itself" below).
 
 > **Remote-name trap:** in the bridge checkouts `origin` is the *upstream*
 > project. Push the fork with `git push schuettc …`, never `origin`. Check
@@ -255,9 +273,12 @@ Dependabot bumps. Nothing is copied into a fork.
    `tested-tree@` pin (`tested-tree/tests/check.sh` fails until they agree).
    CI green, Court approves, the merge tags `v<VERSION>`.
 6. Roll out: Dependabot opens a `github-actions` PR against `schuettc-publish`
-   in each fork in tools-ops' `forks.tsv` (weekly, after a 3-day cooldown). Merge
-   each one; its `ci:` commit is exempt from `patches.tsv`. For an urgent fix,
-   bump the `@vX.Y.Z` pin by hand in the same way.
+   in each fork in tools-ops' `forks.tsv` (weekly, after a 3-day cooldown).
+   Merge each one; its `ci:` commit is exempt from `patches.tsv`.
+   `pi-permission-system` keeps Dependabot disabled (see the Quick
+   reference), so its pin is always bumped by hand — the same way you'd
+   handle an urgent fix on any fork: edit the `@vX.Y.Z` pin in its
+   `upstream-sync.yml` directly.
 7. `muda check fork-sync` shows green, then dispatch `dry_run` on each fork.
 
 ---

@@ -192,10 +192,16 @@ committed lockfile changes out of the patch: if our patch adds a dependency, use
        target-branch: schuettc-publish
        schedule: { interval: weekly }
        cooldown: { default-days: 3 }
+       allow:
+         - dependency-name: "schuettc/tools-actions"
    ```
 
    Only `github-actions`: an `npm` entry would open PRs against upstream's
-   dependencies. Commit both as a `ci:` commit and push.
+   dependencies. The `allow` entry restricts bumps to our own pin: without it
+   Dependabot would also propose bumps to every other action `uses:`d in the
+   fork's workflow files, including upstream's own disabled workflows
+   (ci.yml, publish.yml, …), and each such bump becomes a fork patch that
+   conflicts on rebase. Commit both as a `ci:` commit and push.
 3. Repo settings: `gh api -X PATCH repos/<fork> -f default_branch=schuettc-publish -F has_issues=true`;
    enable Actions (`gh api -X PUT repos/<fork>/actions/permissions -F enabled=true -f allowed_actions=all`);
    `gh workflow disable` each upstream scheduled/tag/publish workflow.
@@ -206,6 +212,11 @@ committed lockfile changes out of the patch: if our patch adds a dependency, use
    `gh api repos/<fork>/actions/workflows` reports 0 workflows and
    `gh workflow disable` returns 404. Click it, then disable the upstream
    workflows.
+
+   **Enable Dependabot version updates.** GitHub keeps Dependabot version
+   updates off on forks by default, and there's no API for turning them on:
+   once `.github/dependabot.yml` has landed, open the fork's Settings → Code
+   security page and click Enable under "Dependabot version updates".
 4. Dispatch `notify_test`, then `dry_run`.
 5. **npm, one-time.** Trust can only attach to a package that exists, so the
    first version is published by hand. The agent runs this action's
@@ -248,12 +259,15 @@ each one to the caller with one `ci:` PR into `schuettc-publish`:
    npm's trusted publisher names it.
 2. Delete `.github/scripts/upstream-sync.sh` and `.copier-answers.fork-sync.yml`.
 3. Add `.github/dependabot.yml` (onboarding step 2): `github-actions` only,
-   `target-branch: schuettc-publish`.
+   `target-branch: schuettc-publish`, with the `allow` entry restricting it to
+   `schuettc/tools-actions`.
 4. Before merging, dispatch a dry run from the PR branch:
    `gh workflow run upstream-sync.yml -R <fork> --ref <pr-branch> -f dry_run=true`.
    The run must be green, and its log must show the rebase, `test_cmd`,
    `build_cmd` and `npm pack`.
-5. Merge, then wait for the fork's next scheduled run to succeed. When upstream
+5. Merge, then enable Dependabot version updates in the fork's Settings →
+   Code security (off by default on forks, no API for it; onboarding step 3),
+   then wait for the fork's next scheduled run to succeed. When upstream
    has moved, `npm view <pkg> version` must match what it published.
 
 Order across the fleet: migrate first a fork with upstream commits pending, so
