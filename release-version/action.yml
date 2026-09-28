@@ -1,0 +1,66 @@
+name: Release version
+description: >-
+  Resolves what a Go tool's release run should do: the tag, the bare semver,
+  the short commit and UTC date to stamp, and whether to create a release, mark
+  it a pre-release, or skip. Two release models: `version-file` (a VERSION file
+  on the release branch; workflow_dispatch cuts a v<VERSION>-rc.<run>
+  pre-release, or rebuilds an existing tag's assets) and `prefixed-tag`
+  (a pushed <tool>/v<semver> tag, one tool per tag, as in a monorepo). The
+  calling job must run actions/checkout first (prefixed-tag needs the tree to
+  confirm cmd/<tool> exists).
+
+inputs:
+  mode:
+    description: "version-file | prefixed-tag"
+    required: true
+  version-file:
+    description: "Path of the VERSION file (version-file mode)."
+    required: false
+    default: VERSION
+  dispatch-tag:
+    description: "On workflow_dispatch: an existing tag to rebuild; empty cuts an rc pre-release."
+    required: false
+    default: ""
+  github-token:
+    description: "Token for `gh release view` (version-file mode checks whether the tag is already released)."
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  tag:
+    description: "Release tag (v1.2.3, v1.2.3-rc.42, or scratch/v0.5.4)."
+    value: ${{ steps.resolve.outputs.tag }}
+  version:
+    description: "Bare semver, the /dl path key (1.2.3, 1.2.3-rc.42)."
+    value: ${{ steps.resolve.outputs.version }}
+  tool:
+    description: "prefixed-tag mode: the tool the tag names."
+    value: ${{ steps.resolve.outputs.tool }}
+  commit:
+    description: "Short commit of the checked-out tree, for the version stamp."
+    value: ${{ steps.resolve.outputs.commit }}
+  date:
+    description: "UTC build date (YYYY-MM-DD), for the version stamp."
+    value: ${{ steps.resolve.outputs.date }}
+  create:
+    description: '"true" when this run creates the GitHub release.'
+    value: ${{ steps.resolve.outputs.create }}
+  prerelease:
+    description: '"true" for an rc or any version with a "-": publishes versioned paths, never moves latest.'
+    value: ${{ steps.resolve.outputs.prerelease }}
+  skip:
+    description: '"true" when the release already exists: do nothing.'
+    value: ${{ steps.resolve.outputs.skip }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        VERSION_FILE: ${{ inputs.version-file }}
+        DISPATCH_TAG: ${{ inputs.dispatch-tag }}
+        EVENT: ${{ github.event_name }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: bash "$GITHUB_ACTION_PATH/resolve.sh"

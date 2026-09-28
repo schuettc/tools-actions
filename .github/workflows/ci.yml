@@ -111,3 +111,33 @@ jobs:
       - name: action.yml matches SOURCE + README examples
         shell: bash
         run: bash tested-tree/tests/check.sh
+
+  release-version:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: release-version tests
+        shell: bash
+        run: bash release-version/tests/test.sh
+
+  go-release:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: "1.26"
+      - name: go-release tests
+        shell: bash
+        run: bash go-release/tests/test.sh
+
+  go-ci:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: "1.26"
+      - name: go-ci tests
+        shell: bash
+        run: bash go-ci/tests/test.sh

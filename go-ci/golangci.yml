@@ -1,0 +1,11 @@
+# The family's default golangci-lint config (v2), used by go-ci when a repo
+# has no .golangci.yml of its own. The standard set: errcheck, govet,
+# ineffassign, staticcheck, unused. A repo that needs more (or named
+# exclusions) keeps its own config, which go-ci always prefers.
+version: "2"
+linters:
+  default: standard
+  exclusions:
+    paths:
+      - node_modules
+      - .worktrees

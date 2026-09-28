@@ -1,0 +1,191 @@
+name: Go release
+description: >-
+  Builds a Go tool's binaries for darwin/linux x arm64/amd64 with its version
+  stamped, signs and notarizes the macOS binaries, checks the stamp on the
+  native binary, packages tarballs with .sha256 files and checksums.txt,
+  creates or updates the GitHub release, and publishes to the family download
+  contract (<tool>.tools/dl/<tool>/<version>/, moving /dl/<tool>/latest only
+  for a created, non-prerelease release). Runs in the caller's job, so the
+  job's `release` environment secrets and OIDC identity are the caller's own.
+  Feed it release-version's outputs; skip the step when release-version says
+  skip. The calling job must check out the tree and grant contents: write and
+  id-token: write. Signing needs a macOS runner.
+
+inputs:
+  binaries:
+    description: 'One binary per line: "name=./cmd/pkg". Asset names are <name>_<os>_<arch>.tar.gz.'
+    required: true
+  ldflags:
+    description: "-ldflags for the stamp, with {version} {commit} {date} placeholders (-s -w is added)."
+    required: true
+  stamp-check:
+    description: "Binaries whose `version` must print '<name> <version> (<commit>, <date>)'. Only these are ever executed."
+    required: true
+  targets:
+    description: "GOOS/GOARCH pairs."
+    required: false
+    default: "darwin/arm64 darwin/amd64 linux/amd64 linux/arm64"
+  build-tags:
+    description: "go build -tags value."
+    required: false
+    default: ""
+  setup-go:
+    description: "Run actions/setup-go with go-version-file (set false if the caller already did)."
+    required: false
+    default: "true"
+  go-version-file:
+    description: "Passed to actions/setup-go."
+    required: false
+    default: go.mod
+  tag:
+    description: "release-version output."
+    required: true
+  version:
+    description: "release-version output (bare semver)."
+    required: true
+  commit:
+    description: "release-version output."
+    required: true
+  date:
+    description: "release-version output."
+    required: true
+  create:
+    description: "release-version output."
+    required: true
+  prerelease:
+    description: "release-version output."
+    required: true
+  release-title:
+    description: "GitHub release title."
+    required: false
+    default: ""
+  extra-assets:
+    description: "Globs of extra files already in dist/ to attach to the release and checksums.txt (not published to /dl)."
+    required: false
+    default: ""
+  sign:
+    description: 'Sign and notarize the darwin binaries. "false" only for a tool that has never shipped signed binaries.'
+    required: false
+    default: "true"
+  apple-developer-id-p12:
+    description: "Base64 Developer ID Application certificate (a secret)."
+    required: false
+    default: ""
+  apple-developer-id-p12-password:
+    description: "Its password (a secret; may be empty)."
+    required: false
+    default: ""
+  apple-notary-key:
+    description: "Base64 App Store Connect API key .p8 (a secret)."
+    required: false
+    default: ""
+  apple-notary-key-id:
+    description: "App Store Connect API key id (a secret)."
+    required: false
+    default: ""
+  apple-notary-issuer-id:
+    description: "App Store Connect issuer id (a secret)."
+    required: false
+    default: ""
+  dl-tool:
+    description: "Tool name in /dl/<tool>/. Empty skips the download-page publish."
+    required: false
+    default: ""
+  dl-role-arn:
+    description: "IAM role the job assumes (OIDC) to write the downloads bucket."
+    required: false
+    default: ""
+  dl-bucket:
+    description: "Downloads bucket."
+    required: false
+    default: ""
+  dl-distribution-id:
+    description: "CloudFront distribution to invalidate /dl/<tool>/latest on."
+    required: false
+    default: ""
+  aws-region:
+    description: "Region for the downloads role."
+    required: false
+    default: us-east-1
+  github-token:
+    description: "Token for the GitHub release."
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - if: inputs.setup-go == 'true'
+      uses: actions/setup-go@v7.0.0
+      with:
+        go-version-file: ${{ inputs.go-version-file }}
+    - name: Import the Developer ID certificate
+      if: inputs.sign == 'true'
+      shell: bash
+      env:
+        P12: ${{ inputs.apple-developer-id-p12 }}
+        P12_PASSWORD: ${{ inputs.apple-developer-id-p12-password }}
+      run: bash "$GITHUB_ACTION_PATH/sign-setup.sh"
+    - name: Build (and sign) every target
+      shell: bash
+      env:
+        BINARIES: ${{ inputs.binaries }}
+        LDFLAGS: ${{ inputs.ldflags }}
+        VERSION: ${{ inputs.version }}
+        COMMIT: ${{ inputs.commit }}
+        DATE: ${{ inputs.date }}
+        TARGETS: ${{ inputs.targets }}
+        BUILD_TAGS: ${{ inputs.build-tags }}
+        SIGN: ${{ inputs.sign }}
+      run: bash "$GITHUB_ACTION_PATH/build.sh"
+    - name: Check the version stamp on the native binary
+      shell: bash
+      env:
+        STAMP_CHECK: ${{ inputs.stamp-check }}
+        VERSION: ${{ inputs.version }}
+        COMMIT: ${{ inputs.commit }}
+        DATE: ${{ inputs.date }}
+      run: bash "$GITHUB_ACTION_PATH/stamp-check.sh"
+    - name: Notarize the macOS binaries
+      if: inputs.sign == 'true'
+      shell: bash
+      env:
+        NOTARY_KEY: ${{ inputs.apple-notary-key }}
+        NOTARY_KEY_ID: ${{ inputs.apple-notary-key-id }}
+        NOTARY_ISSUER_ID: ${{ inputs.apple-notary-issuer-id }}
+      run: bash "$GITHUB_ACTION_PATH/notarize.sh"
+    - name: Package
+      shell: bash
+      env:
+        EXTRA_ASSETS: ${{ inputs.extra-assets }}
+      run: bash "$GITHUB_ACTION_PATH/package.sh"
+    - name: GitHub release
+      shell: bash
+      env:
+        TAG: ${{ inputs.tag }}
+        CREATE: ${{ inputs.create }}
+        PRERELEASE: ${{ inputs.prerelease }}
+        TITLE: ${{ inputs.release-title }}
+        EXTRA_ASSETS: ${{ inputs.extra-assets }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: bash "$GITHUB_ACTION_PATH/github-release.sh"
+    - name: Configure AWS credentials (downloads)
+      if: inputs.dl-tool != ''
+      uses: aws-actions/configure-aws-credentials@v6.3.0
+      with:
+        role-to-assume: ${{ inputs.dl-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+    - name: Publish to the download page
+      if: inputs.dl-tool != ''
+      shell: bash
+      env:
+        DL_TOOL: ${{ inputs.dl-tool }}
+        BUCKET: ${{ inputs.dl-bucket }}
+        VERSION: ${{ inputs.version }}
+        PROMOTE: ${{ inputs.create == 'true' && inputs.prerelease != 'true' }}
+        DISTRIBUTION_ID: ${{ inputs.dl-distribution-id }}
+      run: bash "$GITHUB_ACTION_PATH/publish-dl.sh"
+    - name: Destroy the signing material
+      if: always()
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/cleanup.sh"
