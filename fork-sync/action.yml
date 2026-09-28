@@ -1,0 +1,108 @@
+name: fork-sync
+description: >-
+  Rebase a republished npm fork's publish branch onto upstream, gate it on the
+  fork's own tests, and publish the next <upstream-version>-schuettc.N via npm
+  OIDC trusted publishing. Conflicts and failures open a deduplicated tracking
+  issue on the fork and fail the run. See fork-sync/README.md.
+
+inputs:
+  upstream_repo:
+    description: "Upstream repository to track, owner/name (e.g. example-org/widget)"
+    required: true
+  upstream_branch:
+    description: "Upstream branch to track (main, master, ...)"
+    required: true
+  pkg_name:
+    description: "Published npm name (e.g. @schuettc/widget)"
+    required: true
+  pkg_dir:
+    description: "Package directory relative to the repo root (\".\" for the root)"
+    required: true
+  tag_prefix:
+    description: "Git tag prefix for releases (e.g. \"v\" or \"widget-v\")"
+    required: true
+  test_cmd:
+    description: "Gate run at the repo root after the rebase, before anything is published. Must install its own deps."
+    required: true
+  build_cmd:
+    description: "Build run at the repo root before packing, when the package ships built output. Empty for none."
+    required: false
+    default: ""
+  force:
+    description: "\"true\" publishes the current state even when already in sync"
+    required: false
+    default: "false"
+  dry_run:
+    description: "\"true\" runs rebase/test/build/pack end to end; publishes, pushes and files nothing"
+    required: false
+    default: "false"
+  notify_test:
+    description: "\"true\" opens and closes a test issue to prove alerts reach the owner, then stops"
+    required: false
+    default: "false"
+  node_version:
+    description: "Node.js version for actions/setup-node"
+    required: false
+    default: "22"
+  publish_branch:
+    description: >-
+      Reserved for a later release. upstream-sync.sh supports only
+      schuettc-publish (it pushes and tags that branch by name), so any other
+      value fails the run before anything is checked out.
+    required: false
+    default: schuettc-publish
+  token:
+    description: "Token for checkout, push, tags and issues on the fork"
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    # upstream-sync.sh hard-codes schuettc-publish as the branch it force-pushes;
+    # checking out any other branch would rebase it and push it over
+    # schuettc-publish. Refuse before anything runs.
+    - name: Guard publish_branch (only schuettc-publish is supported)
+      id: publish-branch-guard
+      shell: bash
+      env:
+        PUBLISH_BRANCH: ${{ inputs.publish_branch }}
+      run: |
+        if [ "$PUBLISH_BRANCH" != "schuettc-publish" ]; then
+          echo "::error::fork-sync: publish_branch '${PUBLISH_BRANCH}' is not supported. The sync script supports only schuettc-publish; the publish_branch input is reserved for a later release. Remove it from with: or set it to schuettc-publish."
+          exit 1
+        fi
+    # Always the publish branch with full history, even when the caller was
+    # dispatched from another ref (e.g. a migration PR branch): the script
+    # rebases, force-pushes and tags this branch.
+    - uses: actions/checkout@v7.0.1
+      with:
+        ref: ${{ inputs.publish_branch }}
+        fetch-depth: 0
+        token: ${{ inputs.token }}
+    - uses: actions/setup-node@v7.0.0
+      with:
+        node-version: ${{ inputs.node_version }}
+        registry-url: https://registry.npmjs.org
+    - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
+      shell: bash
+      run: npm install -g npm@latest
+    - name: Sync onto upstream and publish
+      shell: bash
+      env:
+        UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+        UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+        PKG_NAME: ${{ inputs.pkg_name }}
+        PKG_DIR: ${{ inputs.pkg_dir }}
+        TAG_PREFIX: ${{ inputs.tag_prefix }}
+        TEST_CMD: ${{ inputs.test_cmd }}
+        # Straight through: an empty build_cmd must reach the script as "".
+        BUILD_CMD: ${{ inputs.build_cmd }}
+        GH_TOKEN: ${{ inputs.token }}
+        # Composite inputs are strings. A dispatch passes "true"/"false"; a
+        # schedule run has no dispatch inputs, so the caller forwards "". The
+        # script gets exactly "true", or "false" for anything else.
+        FORCE: ${{ inputs.force == 'true' && 'true' || 'false' }}
+        DRY_RUN: ${{ inputs.dry_run == 'true' && 'true' || 'false' }}
+        NOTIFY_TEST: ${{ inputs.notify_test == 'true' && 'true' || 'false' }}
+      run: bash "$GITHUB_ACTION_PATH/upstream-sync.sh"
