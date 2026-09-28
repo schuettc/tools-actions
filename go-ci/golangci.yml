@@ -3,9 +3,15 @@
 # ineffassign, staticcheck, unused. A repo that needs more (or named
 # exclusions) keeps its own config, which go-ci always prefers.
 version: "2"
+run:
+  # Match exclusion paths against the path inside the checkout, so a checkout
+  # that itself lives under <repo>/.worktrees/<branch> (how this family works)
+  # is linted like any other.
+  relative-path-mode: gitroot
 linters:
   default: standard
   exclusions:
     paths:
-      - node_modules
-      - .worktrees
+      # Go includes node_modules in ./..., and web tooling can vendor Go there.
+      # (.worktrees needs no rule: ./... never enters a directory starting with ".")
+      - (^|/)node_modules/

@@ -107,7 +107,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - id: lookup
-        uses: schuettc/tools-actions/tested-tree@v0.2.1
+        uses: schuettc/tools-actions/tested-tree@v0.2.2
         with:
           base: main
 
