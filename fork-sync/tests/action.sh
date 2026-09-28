@@ -14,6 +14,8 @@
 #     (Review Focus 2);
 #   - checkout fetches inputs.publish_branch with full history and the caller's
 #     token, whatever ref the workflow was dispatched from (Review Focus 4);
+#   - a guard step, first, fails any publish_branch but schuettc-publish (the
+#     script hard-codes that branch for its push);
 #   - every `uses:` is an exact vX.Y.Z;
 #   - the README caller snippet pins this repo's VERSION, passes exactly the
 #     action's inputs, and is clean under actionlint.
@@ -77,8 +79,25 @@ check "script runs from \$GITHUB_ACTION_PATH" '[ "$(yq -r "$RUN_STEP | .run" "$A
 check "every run step declares shell: bash" '[ "$(yq -r "[.runs.steps[] | select(has(\"run\")) | select(.shell != \"bash\")] | length" "$ACTION")" = 0 ]'
 check "npm upgraded to latest before the script (OIDC needs npm >= 11.5.1)" \
   '[ "$(yq -r "[.runs.steps[] | select((.run // \"\") == \"npm install -g npm@latest\")] | length" "$ACTION")" = 1 ]'
-check "step order: checkout, setup-node, npm upgrade, sync" \
-  '[ "$(yq -r "[.runs.steps[] | (.uses // .run) | sub(\"@.*\", \"\") | sub(\"\n\$\", \"\")] | join(\"|\")" "$ACTION")" = "actions/checkout|actions/setup-node|npm install -g npm|bash \"\$GITHUB_ACTION_PATH/upstream-sync.sh\"" ]'
+check "step order: publish_branch guard, checkout, setup-node, npm upgrade, sync" \
+  '[ "$(yq -r "[.runs.steps[] | (.id // .uses // .run) | sub(\"@.*\", \"\") | sub(\"\n\$\", \"\")] | join(\"|\")" "$ACTION")" = "publish-branch-guard|actions/checkout|actions/setup-node|npm install -g npm|bash \"\$GITHUB_ACTION_PATH/upstream-sync.sh\"" ]'
+
+echo "== publish_branch guard"
+# upstream-sync.sh hard-codes BRANCH=schuettc-publish and force-pushes HEAD to it;
+# checking out any other branch would push that branch over schuettc-publish.
+GUARD='.runs.steps[] | select(.id == "publish-branch-guard")'
+check "script still hard-codes schuettc-publish (guard needed)" 'grep -qx '"'"'BRANCH="schuettc-publish"'"'"' "$SCRIPT"'
+check "guard is the first step, before checkout" '[ "$(yq -r ".runs.steps[0].id" "$ACTION")" = publish-branch-guard ]'
+check "guard reads inputs.publish_branch" '[ "$(yq -r "$GUARD | .env.PUBLISH_BRANCH" "$ACTION")" = "\${{ inputs.publish_branch }}" ]'
+guard_run() { # <branch> -> runs the guard's shell body; sets GRC and GOUT
+  GOUT="$(PUBLISH_BRANCH="$1" bash -c "$(yq -r "$GUARD | .run" "$ACTION")" 2>&1)"; GRC=$?
+}
+guard_run schuettc-publish
+check "guard passes schuettc-publish" '[ "$GRC" = 0 ] && [ -z "$GOUT" ]'
+guard_run other
+check "guard fails any other branch with ::error::" '[ "$GRC" != 0 ] && grep -q "^::error::.*supports only schuettc-publish" <<<"$GOUT"'
+guard_run ""
+check "guard fails an empty branch" '[ "$GRC" != 0 ]'
 
 echo "== checkout (Review Focus 4)"
 check "checkout ref is inputs.publish_branch" '[ "$(yq -r "$CHECKOUT | .with.ref" "$ACTION")" = "\${{ inputs.publish_branch }}" ]'

@@ -133,14 +133,18 @@ Keep the rest verbatim:
 | `dry_run` | no | `"false"` | `"true"` runs everything but publish, push, tag and issue | `${{ inputs.dry_run }}` |
 | `notify_test` | no | `"false"` | `"true"` opens and closes a test issue, then stops | `${{ inputs.notify_test }}` |
 | `node_version` | no | `"22"` | Node.js for `actions/setup-node` | `"22"` |
-| `publish_branch` | no | `schuettc-publish` | the branch checked out, rebased, pushed and tagged | |
+| `publish_branch` | no | `schuettc-publish` | reserved for a later release: the sync script supports only `schuettc-publish`, so any other value fails the run in the first step | leave unset |
 | `token` | no | `${{ github.token }}` | checkout, push, tags and issues on the fork | |
 
 - `force`, `dry_run` and `notify_test` reach the script as exactly `true`, or
   `false` for anything else (including the empty string a schedule run passes).
 - `build_cmd` reaches the script as-is: `""` means no build step.
-- The action always checks out `publish_branch` with full history, whatever ref
-  the workflow was dispatched from. A `dry_run` dispatched from a PR branch
+- `publish_branch` is reserved. `upstream-sync.sh` pushes and tags
+  `schuettc-publish` by name, so checking out any other branch would rebase it
+  and force-push it over `schuettc-publish`. The action's first step fails with
+  an `::error::` unless the value is `schuettc-publish`.
+- The action always checks out `schuettc-publish` with full history, whatever
+  ref the workflow was dispatched from. A `dry_run` dispatched from a PR branch
   therefore still exercises `schuettc-publish`, using the action at the pin on
   that branch.
 
@@ -161,7 +165,7 @@ committed lockfile changes out of the patch: if our patch adds a dependency, use
 
 | Path | Role |
 |---|---|
-| `action.yml` | The composite action: checkout of `publish_branch`, setup-node, npm upgrade, then the script. |
+| `action.yml` | The composite action: the `publish_branch` guard, checkout of `schuettc-publish`, setup-node, npm upgrade, then the script. |
 | `upstream-sync.sh` | The sync script, run from `$GITHUB_ACTION_PATH`. Forks never carry a copy. |
 | `first-publish.sh` | Builds a new fork's first-publish tarball the way CI would and prints the one publish command. |
 | `tests/test.sh` | Hermetic tests for the script and `first-publish.sh` (synthetic repos, npm/gh shims). |

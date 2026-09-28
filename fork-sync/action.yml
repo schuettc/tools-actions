@@ -45,7 +45,10 @@ inputs:
     required: false
     default: "22"
   publish_branch:
-    description: "The fork's publish branch (checked out whatever ref the workflow was dispatched from)"
+    description: >-
+      Reserved for a later release. upstream-sync.sh supports only
+      schuettc-publish (it pushes and tags that branch by name), so any other
+      value fails the run before anything is checked out.
     required: false
     default: schuettc-publish
   token:
@@ -56,6 +59,19 @@ inputs:
 runs:
   using: composite
   steps:
+    # upstream-sync.sh hard-codes schuettc-publish as the branch it force-pushes;
+    # checking out any other branch would rebase it and push it over
+    # schuettc-publish. Refuse before anything runs.
+    - name: Guard publish_branch (only schuettc-publish is supported)
+      id: publish-branch-guard
+      shell: bash
+      env:
+        PUBLISH_BRANCH: ${{ inputs.publish_branch }}
+      run: |
+        if [ "$PUBLISH_BRANCH" != "schuettc-publish" ]; then
+          echo "::error::fork-sync: publish_branch '${PUBLISH_BRANCH}' is not supported. The sync script supports only schuettc-publish; the publish_branch input is reserved for a later release. Remove it from with: or set it to schuettc-publish."
+          exit 1
+        fi
     # Always the publish branch with full history, even when the caller was
     # dispatched from another ref (e.g. a migration PR branch): the script
     # rebases, force-pushes and tags this branch.
