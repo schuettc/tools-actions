@@ -1,0 +1,133 @@
+name: Tested-tree lookup
+description: >-
+  Decides whether this repo's CI (.github/workflows/ci.yml) already tested the
+  EXACT tree of the checked-out commit AGAINST THE SAME TARGET BRANCH now being
+  deployed, and succeeded, so a deploy can skip the mirrored check jobs (W6).
+  The key is the pair (git tree hash, target branch), not the commit: the
+  evidence (docs/superpowers/plans/2026-09-27-w6-tested-tree.md) is that every
+  sampled merge landed a tree identical to the PR CI merge-ref tree, so tree
+  identity — checked per deploy — is the guarantee, not any branch setting.
+
+  Why the base matters (W6 ruling): a skip must be backed by a CI run of a PR
+  INTO THE SAME BRANCH being deployed. CI config can legitimately differ by
+  target branch (e.g. a repo may synthesize stage=prod for PRs into main), so a
+  record produced by a PR into `dev` must NOT buy a skip for a deploy to
+  `main`, and vice-versa. Records are therefore scoped as
+  `tested-tree-<tree>-<base>` (base = the PR's github.base_ref), and this lookup
+  only accepts a record whose <base> matches the branch being deployed.
+
+  Fail-safe by construction: on ANY inability to *prove* the tree passed CI for
+  this base (API error, no record, wrong workflow, non-pull_request event,
+  non-success, expired), the output is tested=false, so the deploy runs the
+  full checks. A lookup we cannot verify never buys a skip.
+
+# The deploy passes the branch it is deploying: deploy-dev passes `dev`,
+# deploy-prod passes `main`. It must equal the github.base_ref the recording
+# PR CI run targeted (the <base> baked into the artifact name).
+inputs:
+  base:
+    description: "Target branch being deployed (dev|main); must match the recording PR's github.base_ref."
+    required: true
+
+# The one job output the deploy workflow gates on. "true" only when a
+# non-expired ci.yml run (pull_request event) with conclusion=success recorded
+# this exact tree for this exact base.
+outputs:
+  tested:
+    description: '"true" iff this exact tree already passed this repo''s ci.yml for this base.'
+    value: ${{ steps.lookup.outputs.tested }}
+
+# The calling job MUST run actions/checkout before this action: a local
+# (`./.github/actions/...`) action can only be resolved once the repo is on
+# disk, and we compute the tree from that same checkout (the pushed SHA on a
+# push; the dispatched ref's head on workflow_dispatch — `HEAD^{tree}` either
+# way). Kept out of this composite deliberately, so there is exactly one
+# checkout per job.
+runs:
+  using: composite
+  steps:
+    - name: Compute tree of pushed commit
+      id: tree
+      shell: bash
+      run: echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+    - name: Look up tested-tree record
+      id: lookup
+      shell: bash
+      env:
+        # github.token carries the actions:read scope the deploy job grants for
+        # the artifacts + runs API. No write scope is used here.
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        TREE: ${{ steps.tree.outputs.tree }}
+        BASE: ${{ inputs.base }}
+      run: |
+        set -uo pipefail
+
+        # Every failure path funnels through here: emit tested=false, one
+        # ::warning:: (visible, not silent), a step-summary line, and exit 0 so
+        # the deploy proceeds down the stricter full-checks path.
+        not_tested() {
+          echo "::warning::tested-tree lookup failed: $1; running full checks"
+          echo "tested=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Tested-tree lookup"
+            echo ""
+            echo "**Running full checks** — $1."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        }
+
+        # Record name is scoped to the target branch: a PR into `dev` and a PR
+        # into `main` on the same tree produce DISTINCT records, so a deploy to
+        # one branch can never be satisfied by CI that ran for the other.
+        name="tested-tree-${TREE}-${BASE}"
+
+        # The repo-level "list artifacts" endpoint filters by exact name, so we
+        # never download-and-scan — the record's name alone carries the tree
+        # AND the base.
+        if ! resp=$(gh api "repos/${REPO}/actions/artifacts?name=${name}" 2>&1); then
+          not_tested "artifacts API error: ${resp}"
+        fi
+
+        # Consider only NON-EXPIRED artifacts (a record past its 30-day
+        # retention must not buy a skip), newest recording run first.
+        run_id=$(printf '%s' "$resp" | jq -r '
+          [.artifacts[]? | select(.expired == false)]
+          | sort_by(.workflow_run.id) | reverse | .[0].workflow_run.id // empty')
+        if [ -z "$run_id" ]; then
+          not_tested "no unexpired artifact named ${name}"
+        fi
+
+        # The artifacts payload does not carry the workflow path or event, so
+        # look the run up. Requiring .path == .github/workflows/ci.yml AND
+        # .event == pull_request AND conclusion == success is what makes the
+        # record trustworthy: any OTHER workflow (or a hand-uploaded artifact of
+        # this name), a non-PR trigger, or a run that did not conclude success is
+        # rejected. The pull_request event check pins the record to the
+        # base-branch CI config the ruling requires (github.base_ref only exists
+        # on pull_request runs).
+        if ! run=$(gh api "repos/${REPO}/actions/runs/${run_id}" 2>&1); then
+          not_tested "run ${run_id} API error: ${run}"
+        fi
+        path=$(printf '%s' "$run" | jq -r '.path // empty')
+        event=$(printf '%s' "$run" | jq -r '.event // empty')
+        conclusion=$(printf '%s' "$run" | jq -r '.conclusion // empty')
+        url=$(printf '%s' "$run" | jq -r '.html_url // empty')
+
+        if [ "$path" != ".github/workflows/ci.yml" ]; then
+          not_tested "record's run ${run_id} is not ci.yml (path=${path:-<none>})"
+        fi
+        if [ "$event" != "pull_request" ]; then
+          not_tested "record's run ${run_id} event=${event:-<none>} (not pull_request)"
+        fi
+        if [ "$conclusion" != "success" ]; then
+          not_tested "ci.yml run ${run_id} conclusion=${conclusion:-<none>}"
+        fi
+
+        echo "tested=true" >> "$GITHUB_OUTPUT"
+        {
+          echo "### Tested-tree lookup"
+          echo ""
+          echo "**Skipping mirrored checks** — tree \`${TREE}\` already passed [CI run ${run_id}](${url}) for base \`${BASE}\`."
+        } >> "$GITHUB_STEP_SUMMARY"
