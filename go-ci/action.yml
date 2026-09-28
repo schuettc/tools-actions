@@ -1,0 +1,74 @@
+name: Go CI
+description: >-
+  The .tools family Go gate: gofmt, go vet, golangci-lint (pinned,
+  checksum-verified; config verified before use), go test -race, and a
+  CGO_ENABLED=0 build for each release target. Uses the repo's own
+  .golangci.yml when it has one, else the family default shipped with this
+  action. The calling job must check out the tree.
+
+inputs:
+  packages:
+    description: "Package patterns for vet, lint, test and build."
+    required: false
+    default: "./..."
+  race:
+    description: "Run go test with -race."
+    required: false
+    default: "true"
+  targets:
+    description: "GOOS/GOARCH pairs to cross-build."
+    required: false
+    default: "darwin/arm64 darwin/amd64 linux/amd64 linux/arm64"
+  lint:
+    description: 'Run golangci-lint. "false" only while a repo is fixing its first findings.'
+    required: false
+    default: "true"
+  setup-go:
+    description: "Run actions/setup-go with go-version-file."
+    required: false
+    default: "true"
+  go-version-file:
+    description: "Passed to actions/setup-go."
+    required: false
+    default: go.mod
+
+runs:
+  using: composite
+  steps:
+    - if: inputs.setup-go == 'true'
+      uses: actions/setup-go@v7.0.0
+      with:
+        go-version-file: ${{ inputs.go-version-file }}
+    - name: Install pinned golangci-lint
+      if: inputs.lint == 'true'
+      shell: bash
+      env:
+        # golangci-lint v2.12.2, checksums from its release's checksums.txt.
+        # Bump the version and all four sums together.
+        GCL_VERSION: "2.12.2"
+        SHA_LINUX_AMD64: 8df580d2670fed8fa984aac0507099af8df275e665215f5c7a2ae3943893a553
+        SHA_LINUX_ARM64: 44cd40a8c76c86755375adfeea52cfd3533cb43d7bd647771e0ae065e166df3a
+        SHA_DARWIN_AMD64: f6f06d94b6241521c53d15450c5209b028270bf966f842afb11c030c79f5bc16
+        SHA_DARWIN_ARM64: a9c54498731b3128f79e090be6110f3e5fffccc617b08142ed244d4126c73f29
+      run: |
+        set -euo pipefail
+        os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        case "$(uname -m)" in arm64|aarch64) arch=arm64;; *) arch=amd64;; esac
+        var="SHA_$(echo "${os}_${arch}" | tr '[:lower:]' '[:upper:]')"; want="${!var}"
+        name="golangci-lint-${GCL_VERSION}-${os}-${arch}"
+        curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v${GCL_VERSION}/${name}.tar.gz" -o "$RUNNER_TEMP/gcl.tar.gz"
+        got="$( (shasum -a 256 "$RUNNER_TEMP/gcl.tar.gz" 2>/dev/null || sha256sum "$RUNNER_TEMP/gcl.tar.gz") | awk '{print $1}')"
+        [ "$got" = "$want" ] || { echo "::error::golangci-lint checksum mismatch ($got)"; exit 1; }
+        tar -xzf "$RUNNER_TEMP/gcl.tar.gz" -C "$RUNNER_TEMP"
+        mkdir -p "$RUNNER_TEMP/bin" && mv "$RUNNER_TEMP/$name/golangci-lint" "$RUNNER_TEMP/bin/"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/bin/golangci-lint" version
+    - name: Go gate
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        RACE: ${{ inputs.race }}
+        TARGETS: ${{ inputs.targets }}
+        SKIP_LINT: ${{ inputs.lint != 'true' }}
+        FAMILY_CONFIG: ${{ github.action_path }}/golangci.yml
+      run: bash "$GITHUB_ACTION_PATH/ci.sh"
