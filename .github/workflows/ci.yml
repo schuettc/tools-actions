@@ -13,6 +13,9 @@ env:
   # Pinned shellcheck (release binary, checksum-verified).
   SHELLCHECK_VERSION: "0.11.0"
   SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+  # Pinned mikefarah yq (release binary, checksum-verified) for fork-sync/tests/action.sh.
+  YQ_VERSION: "4.53.6"
+  YQ_SHA256: "c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385"
 
 jobs:
   lint:
@@ -53,3 +56,38 @@ jobs:
             exit 0
           fi
           shellcheck "${files[@]}"
+
+  fork-sync:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "22.20.0"
+      - name: Install pinned actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "$url" -o actionlint.tar.gz
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          rm -f actionlint.tar.gz actionlint
+          actionlint -version
+      - name: Install pinned yq
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
+          curl -fsSL "$url" -o yq
+          echo "${YQ_SHA256}  yq" | sha256sum -c -
+          sudo install -m 0755 yq /usr/local/bin/yq
+          rm -f yq
+          yq --version
+      - name: upstream-sync.sh + first-publish.sh (hermetic, bash 5)
+        shell: bash
+        run: bash fork-sync/tests/test.sh
+      - name: action.yml + README caller contract
+        shell: bash
+        run: bash fork-sync/tests/action.sh
