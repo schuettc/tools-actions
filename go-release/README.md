@@ -28,10 +28,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with: { ref: "${{ inputs.tag }}" }
       - id: rel
-        uses: schuettc/tools-actions/release-version@v0.2.1
+        uses: schuettc/tools-actions/release-version@v0.2.2
         with: { mode: version-file, dispatch-tag: "${{ inputs.tag }}" }
       - if: steps.rel.outputs.skip != 'true'
-        uses: schuettc/tools-actions/go-release@v0.2.1
+        uses: schuettc/tools-actions/go-release@v0.2.2
         with:
           binaries: |
             kempt=./cmd/kempt

@@ -92,5 +92,21 @@ check "a compile error fails" '[ $rc -ne 0 ] && grep -q "undefined" "$W/log"'
 mkmod "$W/m" "$clean"; run "$W/m"
 check "the build writes nothing into the tree" '[ ! -e "$W/m/x" ]'
 
+echo "== the family config itself (real golangci-lint)"
+if [ -n "${REAL_GOLANGCI_LINT:-}" ]; then
+  # Branch work in this family happens in <repo>/.worktrees/<branch>. The
+  # family config must lint such a checkout, not exclude it (it once matched
+  # any path containing .worktrees and reported "0 issues" for everything).
+  wt="$W/repo/.worktrees/br"; mkdir -p "$wt/cmd/x" "$wt/web/node_modules/q"
+  printf 'module example.com/x\n\ngo 1.22\n' > "$wt/go.mod"
+  printf 'package main\n\nimport "os"\n\nfunc main() { os.Remove("x") }\n' > "$wt/cmd/x/main.go"
+  printf 'package q\n\nimport "os"\n\nfunc F() { os.Remove("x") }\n' > "$wt/web/node_modules/q/q.go"
+  ( cd "$wt" && git init -q . && "$REAL_GOLANGCI_LINT" run --config "$A/golangci.yml" --max-same-issues=0 ./... ) > "$W/log" 2>&1
+  check "lints a checkout that lives under .worktrees/" 'grep -q "cmd/x/main.go:5" "$W/log"'
+  check "still excludes node_modules" '! grep -q "node_modules/q/q.go" "$W/log"'
+else
+  echo "  (skipped: set REAL_GOLANGCI_LINT to the pinned golangci-lint)"
+fi
+
 echo; echo "passed $pass, failed $failn"
 [ "$failn" -eq 0 ]
