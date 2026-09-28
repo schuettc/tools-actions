@@ -44,6 +44,7 @@ run "$W/m"; rc=$?
 check "clean module passes" '[ $rc -eq 0 ]'
 check "family config is used when the repo has none" 'grep -q -- "--config $A/golangci.yml" "$W/lint-calls"'
 check "config is verified before linting" '[ "$(head -1 "$W/lint-calls")" = "golangci-lint config verify --config $A/golangci.yml" ]'
+check "lint reports every finding (no per-linter cap)" 'grep -q "^golangci-lint run .*--max-issues-per-linter=0 --max-same-issues=0" "$W/lint-calls"'
 check "cross-builds each target" 'grep -q "build linux/amd64" "$W/log" && grep -q "build darwin/arm64" "$W/log"'
 
 echo "== the repo's own config wins"

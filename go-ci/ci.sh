@@ -30,7 +30,9 @@ if [ "${SKIP_LINT:-false}" != true ]; then
   config="${config:-${FAMILY_CONFIG:?}}"
   golangci-lint config verify --config "$config"
   # shellcheck disable=SC2086
-  golangci-lint run --config "$config" $pkgs
+  # No caps: golangci-lint's defaults report at most 50 findings per linter
+  # (and 3 of any one kind), which hid three quarters of a repo's findings.
+  golangci-lint run --config "$config" --max-issues-per-linter=0 --max-same-issues=0 $pkgs
   end
 fi
 
