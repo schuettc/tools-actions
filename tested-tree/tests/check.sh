@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Verifies tested-tree/action.yml is byte-identical to the muda source
-# recorded in SOURCE, and that both README.md workflow examples (the
-# recording step a consumer keeps in its ci.yml, and the deploy-job example
-# that calls this lookup) are clean under actionlint.
+# recorded in SOURCE, that every schuettc/tools-actions/tested-tree@ pin in
+# README.md equals v$(cat VERSION), and that both README.md workflow examples
+# (the recording step a consumer keeps in its ci.yml, and the deploy-job
+# example that calls this lookup) are clean under actionlint.
 #
-# Usage: check.sh   (exit 0 = both checks pass)
+# Usage: check.sh   (exit 0 = all checks pass)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ACTION_DIR="$(cd "$HERE/.." && pwd)"
@@ -36,6 +37,27 @@ else
     ok "git hash-object tested-tree/action.yml == SOURCE line 2 ($want_sha)"
   else
     fail "git hash-object tested-tree/action.yml == SOURCE line 2 (want $want_sha, got $got_sha)"
+  fi
+fi
+
+echo "== README pins match VERSION"
+if [ ! -f "$ROOT/VERSION" ]; then
+  fail "VERSION exists at the repo root"
+elif [ ! -f "$README" ]; then
+  fail "tested-tree/README.md exists"
+else
+  want_pin="v$(tr -d '[:space:]' < "$ROOT/VERSION")"
+  pins=()
+  while IFS= read -r p; do pins+=("$p"); done \
+    < <(grep -oE 'schuettc/tools-actions/tested-tree@[^[:space:]`"'"'"')]*' "$README" | sed 's/.*@//')
+  if [ "${#pins[@]}" -eq 0 ]; then
+    fail "README.md pins schuettc/tools-actions/tested-tree@ at least once"
+  else
+    bad=0
+    for p in "${pins[@]}"; do
+      [ "$p" = "$want_pin" ] || { fail "README pin tested-tree@$p == $want_pin (VERSION)"; bad=1; }
+    done
+    [ "$bad" = 1 ] || ok "all ${#pins[@]} README tested-tree@ pin(s) == $want_pin (VERSION)"
   fi
 fi
 

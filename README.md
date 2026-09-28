@@ -7,8 +7,14 @@ for republished npm forks.
 
 Every directory at the repo root that contains an `action.yml` is a
 standalone composite action, published as part of a single repo-wide
-release. Each action has its own README describing its inputs, outputs, and
-usage.
+release:
+
+- [`fork-sync`](fork-sync/README.md): keeps a republished npm fork rebased on
+  upstream and publishes it to npm with trusted publishing.
+- [`tested-tree`](tested-tree/README.md): tells a deploy workflow whether this
+  exact tree already passed the repo's PR CI, so it can skip mirrored checks.
+
+Each action's README describes its inputs, outputs, and usage.
 
 ## Pinning
 
@@ -19,7 +25,7 @@ Callers must pin the action to an exact release tag, never a branch or
 - uses: schuettc/tools-actions/<action>@vX.Y.Z
 ```
 
-`<action>` is the directory name (e.g. `schuettc/tools-actions/some-action@v0.1.0`).
+`<action>` is the directory name, e.g. `schuettc/tools-actions/fork-sync@v0.1.0`.
 Floating references (`@main`, `@v1`, no tag at all) are not supported and
 must not be used.
 

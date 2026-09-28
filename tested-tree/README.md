@@ -21,9 +21,9 @@ design). The short version:
   `github.base_ref`. CI config can legitimately differ by target branch, so a
   record from a PR into `dev` never satisfies a deploy to `main`, and
   vice-versa.
-- **The calling job must run `actions/checkout` first.** This is a composite
-  action, resolved from the checked-out repo, and it computes the tree from
-  that same checkout.
+- **The calling job must run `actions/checkout` first.** The action computes
+  `HEAD^{tree}` from the job's checkout; without one there's no tree to look
+  up.
 
 ## The contract, both halves
 
@@ -52,20 +52,31 @@ jobs:
       - name: Compute tree
         id: tree
         run: echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+      - name: Create the empty record file
+        if: success()
+        run: touch "$RUNNER_TEMP/tested-tree"
       - name: Record tested tree
         if: success()
         uses: actions/upload-artifact@v7.0.1
         with:
           name: tested-tree-${{ steps.tree.outputs.tree }}-${{ github.base_ref }}
-          path: /dev/null
+          path: ${{ runner.temp }}/tested-tree
+          if-no-files-found: error
+          overwrite: true
           retention-days: 7
 ```
 
 - `retention-days` must be long enough that a record from a merged PR is
   still unexpired when the next deploy checks it — 7 days is a starting
   point, not a requirement.
-- The artifact's content is irrelevant (the lookup checks its name only);
-  `path: /dev/null` keeps it empty.
+- The artifact's content is irrelevant (the lookup checks its name only), so
+  the record is one empty file, `$RUNNER_TEMP/tested-tree`.
+  `if-no-files-found: error` makes a missing file fail the step instead of
+  silently recording nothing; `overwrite: true` lets a re-run of the same PR
+  replace its earlier record.
+- Artifact names can't contain `/`, so a `github.base_ref` like `release/x`
+  makes the name invalid and the upload fails. The pattern assumes base
+  branches without slashes, such as `dev` and `main`.
 - This step must run only after the checks it stands in for succeeded
   (`if: success()`), on the `pull_request` event, from `ci.yml` at that exact
   path — the lookup rejects any other workflow, event, or conclusion.
@@ -84,11 +95,13 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   tested-tree:
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
       tested: ${{ steps.lookup.outputs.tested }}
     steps:
@@ -109,24 +122,29 @@ jobs:
   deploy:
     needs: [tested-tree, check-a]
     if: |
-      always() &&
+      !cancelled() &&
       needs.tested-tree.result == 'success' &&
-      (needs.check-a.result == 'success' || needs.check-a.result == 'skipped')
+      (needs.check-a.result == 'success' ||
+        (needs.check-a.result == 'skipped' && needs.tested-tree.outputs.tested == 'true'))
     runs-on: ubuntu-26.04
     steps:
       - run: ./deploy.sh
 ```
 
-- `permissions.actions: read` is what lets `github.token` call the artifacts
-  and runs APIs the lookup uses; no write scope is needed.
+- `actions: read` is what lets `github.token` call the artifacts and runs APIs
+  the lookup uses; no write scope is needed. Grant it on the `tested-tree` job
+  only. The workflow-level `permissions` stay at `contents: read`, which is all
+  the check and deploy jobs need to check out.
 - `base:` is the branch being deployed — for a `deploy-dev` workflow it's
   `dev`, for `deploy-prod` it's `main` — and it must equal the `github.base_ref`
   the recording PR's CI run targeted.
 - Each mirrored check job (`check-a` above; a real workflow may have several)
   is skipped with `if: needs.tested-tree.outputs.tested != 'true'`.
-- `deploy` treats a skipped mirrored check the same as a passing one
-  (`needs.check-a.result == 'skipped' || == 'success'`), and still requires
-  the lookup job itself to have run successfully.
+- `deploy` states its gate explicitly: the run isn't cancelled
+  (`!cancelled()`), the lookup job succeeded, and each mirrored check either
+  succeeded or was skipped *because* the lookup said `tested == 'true'`. A
+  check skipped for any other reason doesn't count as passing. With several
+  check jobs, add one such clause per job, joined with `&&`.
 
 ## Inputs
 
@@ -146,4 +164,4 @@ jobs:
 |---|---|
 | `action.yml` | The lookup: computes the checked-out tree, queries the artifacts and runs APIs, and emits `tested`. |
 | `SOURCE` | The muda source this action is copied from, verbatim, and its git blob sha. |
-| `tests/check.sh` | Confirms `action.yml` still matches `SOURCE`'s sha, and lints both README examples above. |
+| `tests/check.sh` | Confirms `action.yml` still matches `SOURCE`'s sha, that every `tested-tree@` pin in this README equals `v<VERSION>`, and lints both README examples above. |

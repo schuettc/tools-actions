@@ -221,8 +221,9 @@ committed lockfile changes out of the patch: if our patch adds a dependency, use
    `build_cmd`, stamps with the `upstream-sync.sh --stamp` beside it (so it
    matches CI exactly), strips `publishConfig.provenance` (provenance only
    works in CI), writes the tarball to `~/Desktop`, and prints one command.
-   The operator only logs in (`npm login`, if `npm whoami` fails) and runs
-   that `npm publish` line. Then add the trusted publisher in the npmjs.com UI
+   first-publish.sh reads `with:` values that are one-line, plain or
+   double-quoted; any other form fails loudly. The operator only logs in
+   (`npm login`, if `npm whoami` fails) and runs that `npm publish` line. Then add the trusted publisher in the npmjs.com UI
    (package → Settings; the `npm trust` CLI returned an opaque 400 for us):
    user `schuettc`, repo `<fork>`, workflow `upstream-sync.yml`,
    **environment empty**, permission **npm publish** (not staged publish). A

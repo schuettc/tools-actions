@@ -249,9 +249,11 @@ Dependabot bumps. Nothing is copied into a fork.
 4. For any new behaviour, add a test **and** mutation-check it: break the
    script on purpose (`SCRIPT=<mutated copy> bash fork-sync/tests/test.sh`)
    and confirm a test fails.
-5. Release: bump `VERSION` in the same PR and update the README caller
-   snippet's pin to match (`action.sh` fails until they agree). CI green, Court
-   approves, the merge tags `v<VERSION>`.
+5. Release: bump `VERSION` in the same PR and update the pins in both
+   actions' READMEs to match: the fork-sync caller snippet
+   (`fork-sync/tests/action.sh` fails until they agree) and every
+   `tested-tree@` pin (`tested-tree/tests/check.sh` fails until they agree).
+   CI green, Court approves, the merge tags `v<VERSION>`.
 6. Roll out: Dependabot opens a `github-actions` PR against `schuettc-publish`
    in each fork in tools-ops' `forks.tsv` (weekly, after a 3-day cooldown). Merge
    each one; its `ci:` commit is exempt from `patches.tsv`. For an urgent fix,

@@ -6,8 +6,9 @@ on:
     branches: [main]
 
 env:
-  # Pinned actionlint (release binary, checksum-verified). Bumped via
-  # Dependabot's github-actions ecosystem / manual updates.
+  # Pinned actionlint (release binary, checksum-verified). Dependabot can't
+  # bump these env strings: bump the actionlint, shellcheck and yq pins by
+  # hand, updating each VERSION and its SHA256 together.
   ACTIONLINT_VERSION: "1.7.12"
   ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
   # Pinned shellcheck (release binary, checksum-verified).
