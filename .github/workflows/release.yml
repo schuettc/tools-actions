@@ -1,0 +1,58 @@
+name: release
+
+# Merge to main = release. The VERSION file is the knob: when a merge lands
+# on main and no tag v<VERSION> exists yet, this workflow creates the tag
+# and a GitHub release with auto-generated notes. There is no build step —
+# the published artifact is the tagged source, consumed by callers pinning
+# `schuettc/tools-actions/<action>@vX.Y.Z`. A merge that doesn't bump
+# VERSION releases nothing.
+on:
+  push:
+    branches: [main]
+
+# The release only needs to create tags and releases in this repo.
+permissions:
+  contents: write
+
+# Two merges landing close together must not race to cut the same release.
+# Serialize release runs; never cancel one mid-publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Resolve tag and skip-if-released
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v$(tr -d ' \n' < VERSION)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # Skip only when the release genuinely exists. A "release not
+          # found" error means we should cut it; ANY other gh error (auth,
+          # network, rate limit) fails the job loudly rather than
+          # masquerading as "not released" and re-cutting or corrupting a
+          # release.
+          if out="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" 2>&1)"; then
+            echo "VERSION $tag already released — nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$out" | grep -qi "release not found"; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::gh release view failed for $tag (not a 'release not found'):"
+            printf '%s\n' "$out"
+            exit 1
+          fi
+      - name: Create the release
+        if: steps.rel.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.rel.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --generate-notes

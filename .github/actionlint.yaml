@@ -1,0 +1,7 @@
+# actionlint knows GitHub's hosted-runner labels only up to its release date, so
+# a newer image label reads as an "unknown runner label" false positive. This
+# repo's workflows run on ubuntu-26.04; declare it here so actionlint accepts it
+# without masking any real unknown-label finding.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
