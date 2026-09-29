@@ -20,6 +20,7 @@ defined — the ``BASE_BRANCH`` class of ``set -u`` ``unbound variable`` bug.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -150,6 +151,34 @@ def test_action_run_scripts_pass_shellcheck(action_doc: dict, tmp_path: Path) ->
             f"shellcheck failed on run step {step.get('name')!r}:\n"
             f"{result.stdout}\n{result.stderr}"
         )
+
+
+def test_run_script_rejects_empty_root(action_doc: dict, tmp_path: Path) -> None:
+    """The real run script must fail loudly on an empty ``root``: ``root`` has a
+    default of ``"."``, so an empty ``TOOLCHAIN_ROOT`` can only be a caller
+    explicitly passing ``""`` \u2014 never a silent scan of the wrong tree. Extract
+    the actual script GitHub runs and execute it with ``TOOLCHAIN_ROOT=""``,
+    asserting exit code 1 and the exact error, so the guard is proven, not just
+    read. (The guard uses ``[ -z ... ]``, which does not reject a whitespace-only
+    value, so that input is intentionally *not* asserted to be rejected.)
+    """
+    run_script = _run_script(action_doc)
+    script = tmp_path / "run.sh"
+    script.write_text("#!/usr/bin/env bash\n" + run_script)
+    result = subprocess.run(
+        ["bash", str(script)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TOOLCHAIN_ROOT": ""},
+    )
+    assert result.returncode == 1, (
+        f"empty root must exit 1, got {result.returncode}:\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
+    assert (
+        "toolchain action: 'root' must not be empty (default is '.')"
+        in result.stderr
+    ), f"missing empty-root error on stderr:\n{result.stderr}"
 
 
 def _run_script(action_doc: dict) -> str:
