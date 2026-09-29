@@ -36,6 +36,10 @@ release:
 - [`dependabot-stale`](dependabot-stale/README.md): a weekly sweep that keeps one
   labelled tracking issue for Dependabot PRs held open past a threshold, so the
   majors that auto-merge deliberately holds don't rot silently.
+- [`toolchain`](toolchain/README.md): fails CI when a repo's declared toolchain
+  versions disagree anywhere (`.python-version`/`.nvmrc` vs Dockerfile base
+  images and `setup-python`/`setup-node` steps) — one exact version everywhere,
+  test what ships.
 
 Each action's README describes its inputs, outputs, and usage.
 
@@ -48,7 +52,7 @@ Callers must pin the action to an exact release tag, never a branch or
 - uses: schuettc/tools-actions/<action>@vX.Y.Z
 ```
 
-`<action>` is the directory name, e.g. `schuettc/tools-actions/fork-sync@v0.8.0`.
+`<action>` is the directory name, e.g. `schuettc/tools-actions/fork-sync@v0.9.0`.
 Floating references (`@main`, `@v1`, no tag at all) are not supported and
 must not be used.
 

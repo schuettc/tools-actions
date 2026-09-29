@@ -170,6 +170,46 @@ jobs:
         shell: bash
         run: python -m pytest bump/tests -q
 
+  toolchain:
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12.14", "3.14.7"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "${{ matrix.python-version }}"
+      - name: Install pinned actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "$url" -o actionlint.tar.gz
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          rm -f actionlint.tar.gz actionlint
+          actionlint -version
+      - name: Install pinned shellcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSL "$url" -o shellcheck.tar.xz
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          sudo install -m 0755 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          rm -rf shellcheck.tar.xz "shellcheck-v${SHELLCHECK_VERSION}"
+          shellcheck --version
+      - name: Install test deps
+        shell: bash
+        run: python -m pip install --disable-pip-version-check pytest==9.1.1 pyyaml==6.0.3
+      - name: toolchain tests
+        shell: bash
+        run: python -m pytest toolchain/tests -q
+
   release-version:
     runs-on: ubuntu-26.04
     steps:

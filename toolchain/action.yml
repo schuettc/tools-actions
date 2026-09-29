@@ -1,0 +1,47 @@
+name: Toolchain consistency
+description: >-
+  Runs this action's toolchain_consistency.py inside the calling job to fail CI
+  when a repo's declared toolchain versions disagree anywhere. A repo pins its
+  Python and Node once — in `.python-version` and `.nvmrc` — and every other
+  place that names a version (a Dockerfile `FROM`, a `setup-python`/`setup-node`
+  workflow step) must defer to those files rather than restate a version that
+  then drifts.
+
+  The principle is "one exact version everywhere, test what ships." Every
+  discrepancy is reported with file:line; a configured source that cannot be
+  parsed is an error, nothing silently skips. The check is stdlib-only and runs
+  under the runner's own `python3` (the action installs nothing); it requires
+  Python 3.12+ (tested on 3.12 and 3.14). This action embeds NO project facts:
+  where to look and what's expected are the repo's own version files, read from
+  the scanned tree, never baked into the action.
+
+inputs:
+  root:
+    description: >-
+      Repo root to scan. Every source of truth (`.python-version`, `.nvmrc`),
+      every Dockerfile and every workflow under this root is read; nothing is
+      hardcoded in the action.
+    required: false
+    default: "."
+
+runs:
+  using: composite
+  steps:
+    - name: Run toolchain_consistency.py
+      id: run
+      shell: bash
+      env:
+        TOOLCHAIN_ROOT: ${{ inputs.root }}
+      run: |
+        set -euo pipefail
+        # Reject an empty root loudly: `root` has a default of ".", so an empty
+        # value can only be a caller explicitly passing "" — never silently scan
+        # the wrong tree.
+        if [ -z "$TOOLCHAIN_ROOT" ]; then
+          echo "toolchain action: 'root' must not be empty (default is '.')" >&2
+          exit 1
+        fi
+        # toolchain_consistency.py is invoked from beside this action via
+        # $GITHUB_ACTION_PATH (never assumed on PATH or checked out elsewhere)
+        # with the runner's own python3 — it is stdlib-only.
+        python3 "$GITHUB_ACTION_PATH/toolchain_consistency.py" --root "$TOOLCHAIN_ROOT"

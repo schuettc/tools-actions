@@ -1,0 +1,3 @@
+# floating tag — no digest, so the runtime can silently change under us.
+FROM public.ecr.aws/lambda/python:3.14
+RUN echo build
