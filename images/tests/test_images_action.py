@@ -8,9 +8,10 @@ to an exact ``vX.Y.Z`` tag, and every ``run`` step is a strict bash step.
 
 Where ``actionlint`` is available (binary, else ``uvx --from actionlint-py
 actionlint``) the suite also lints a generated caller workflow that *uses* the
-action, so the composite is proven parseable in a real workflow context. If
-neither is available the actionlint check skips (the repo's dedicated actionlint
-CI job lints all workflows regardless).
+action, so the composite is proven parseable in a real workflow context. A test
+that validates workflows must not silently no-op: if neither is available the
+actionlint check *fails* (the ``images`` CI job installs the same pinned
+actionlint so this always runs there).
 """
 
 from __future__ import annotations
@@ -211,7 +212,11 @@ def _actionlint() -> list[str] | None:
 def test_actionlint_on_caller_workflow(tmp_path: Path) -> None:
     runner = _actionlint()
     if runner is None:
-        pytest.skip("actionlint not available (no binary, no uvx)")
+        pytest.fail(
+            "actionlint is not available (no binary, no uvx): a test that "
+            "validates workflows must run, not skip. Install the pinned "
+            "actionlint (see the 'images' CI job) before running this suite."
+        )
 
     # A tiny repo containing a copy of the action and a caller workflow that USES
     # it via a local `./images` reference, so actionlint resolves the composite
