@@ -37,7 +37,11 @@ Subcommands (all read ``--cdk-out DIR`` and ``--config PATH``):
 * ``check-deployed`` — post-deploy outcome gate: each prod container Lambda's or
                        Batch job definition's running image digest must equal the
                        dev digest for its asset hash, else exit 1 with a
-                       per-resource report.
+                       per-resource report. Batch stores its image string verbatim
+                       and never resolves a tag, so a ``:tag`` (no digest) image is
+                       accepted only when its ECR repo is IMMUTABLE for that tag —
+                       the CDK bootstrap container-assets repo is — and the tag
+                       then resolves to a digest via ``ecr describe-images``.
 
 The dev/prod bootstrap repo for an account is derived from the account id and
 the config's ``bootstrap_qualifier`` / ``region``, not from the (stage-specific)
@@ -498,6 +502,74 @@ def _media_type_of(describe_result: dict[str, object]) -> str:
     media_type = details[0]["imageManifestMediaType"]
     assert isinstance(media_type, str)
     return media_type
+
+
+def _describe_repository(
+    repository: str, *, registry_id: str, region: str
+) -> dict[str, object]:
+    """Return the ECR ``describe-repositories`` record for one repository.
+
+    Any failure (repo absent, auth, network) re-raises the `RunError`; a missing
+    bootstrap repo is a real error here, not a value.
+    """
+    proc = _run(
+        [
+            "aws",
+            "ecr",
+            "describe-repositories",
+            "--repository-names",
+            repository,
+            "--registry-id",
+            registry_id,
+            "--region",
+            region,
+        ]
+    )
+    repositories = json.loads(proc.stdout).get("repositories", [])
+    assert isinstance(repositories, list) and repositories
+    record = repositories[0]
+    assert isinstance(record, dict)
+    return record
+
+
+def _exclusion_matches_tag(exclusion: object, tag: str) -> bool:
+    """Whether one ECR tag-mutability exclusion filter matches ``tag``.
+
+    An ``IMMUTABLE_WITH_EXCLUSION`` repository carries
+    ``imageTagMutabilityExclusionFilters``: each is
+    ``{imageTagMutabilityExclusionFilterType, imageTagMutabilityExclusionFilterValue}``
+    where the only documented type is ``WILDCARD`` (``*`` matches any run). A tag
+    the filter matches is *mutable* even in an otherwise-immutable repo. Any
+    filter shape we do not understand is treated conservatively as matching, so
+    an unrecognized exclusion makes us refuse the tag rather than trust it.
+    """
+    if not isinstance(exclusion, dict):
+        return True
+    filter_type = exclusion.get("imageTagMutabilityExclusionFilterType")
+    value = exclusion.get("imageTagMutabilityExclusionFilterValue")
+    if filter_type != "WILDCARD" or not isinstance(value, str):
+        return True
+    pattern = "^" + ".*".join(re.escape(part) for part in value.split("*")) + "$"
+    return re.match(pattern, tag) is not None
+
+
+def _repo_tag_is_immutable(repository_record: dict[str, object], tag: str) -> bool:
+    """Whether ``tag`` is an immutable identity in this ECR repository.
+
+    ``IMMUTABLE`` guarantees every tag is write-once. ``IMMUTABLE_WITH_EXCLUSION``
+    guarantees it only for tags no exclusion filter matches. Everything else
+    (``MUTABLE``, ``MUTABLE_WITH_EXCLUSION``, or an unknown value) means the tag
+    could be repointed, so it is not a stable identity.
+    """
+    mutability = repository_record.get("imageTagMutability")
+    if mutability == "IMMUTABLE":
+        return True
+    if mutability == "IMMUTABLE_WITH_EXCLUSION":
+        filters = repository_record.get("imageTagMutabilityExclusionFilters", [])
+        if not isinstance(filters, list):
+            return False
+        return not any(_exclusion_matches_tag(f, tag) for f in filters)
+    return False
 
 
 # `docker buildx imagetools inspect` emits exactly this suffix on stderr when a
@@ -991,11 +1063,56 @@ def _resolved_lambda_digest(function_name: str, region: str) -> str | None:
     return uri.split("@", 1)[1]
 
 
-def _resolved_batch_digest(job_definition: str, region: str) -> str | None:
-    """``batch describe-job-definitions`` -> the digest of the container image.
+def _deployed_batch_image(definition: dict[str, object]) -> str | None:
+    """Return the container image string a deployed Batch job definition runs.
 
-    Returns None if the deployed job definition's ``containerProperties.image``
-    carries no ``@<digest>`` (an unresolvable image) so the caller can name it.
+    ``batch describe-job-definitions`` echoes the image verbatim under the
+    single-container ``containerProperties.image`` shape or, for the
+    multi-container ``ecsProperties`` shape, under
+    ``ecsProperties.taskProperties[].containers[].image`` (lowercase, unlike the
+    CloudFormation template's ``ContainerProperties`` / ``EcsProperties``). None
+    if neither carries an image.
+    """
+    container_properties = definition.get("containerProperties")
+    if isinstance(container_properties, dict):
+        image = container_properties.get("image")
+        if isinstance(image, str):
+            return image
+    ecs_properties = definition.get("ecsProperties")
+    if isinstance(ecs_properties, dict):
+        task_properties = ecs_properties.get("taskProperties", [])
+        if isinstance(task_properties, list):
+            for task in task_properties:
+                if not isinstance(task, dict):
+                    continue
+                for container in task.get("containers", []):
+                    if isinstance(container, dict):
+                        image = container.get("image")
+                        if isinstance(image, str):
+                            return image
+    return None
+
+
+def _resolved_batch_digest(
+    job_definition: str, config: Config
+) -> tuple[str | None, str | None]:
+    """Resolve a deployed Batch job definition's running image to a digest.
+
+    Returns ``(digest, None)`` on success or ``(None, reason)`` naming why the
+    image cannot be resolved to a trustworthy digest. AWS Batch stores the image
+    string verbatim and never resolves a tag (unlike Lambda's
+    ``ResolvedImageUri``), so:
+
+    * ``<repo>@sha256:...`` (with or without a leading ``:tag``) resolves to that
+      digest directly.
+    * ``<repo>:tag`` (no digest) is trustworthy only when the repository is
+      IMMUTABLE for that tag — CDK's ``ContainerImage.fromDockerImageAsset``
+      renders ``<bootstrap-repo>:<asset-hash>`` and the CDK bootstrap
+      container-assets repo is created IMMUTABLE, making the tag a write-once
+      identity. We verify the repo mutability, then resolve the tag to its
+      digest via ``ecr describe-images``.
+    * anything with neither a tag nor a digest, or in a registry/account other
+      than the expected one, is rejected.
     """
     proc = _run(
         [
@@ -1005,16 +1122,45 @@ def _resolved_batch_digest(job_definition: str, region: str) -> str | None:
             "--job-definitions",
             job_definition,
             "--region",
-            region,
+            config.region,
         ]
     )
     definitions = json.loads(proc.stdout).get("jobDefinitions", [])
     if not definitions:
-        return None
-    image = definitions[0].get("containerProperties", {}).get("image")
-    if not isinstance(image, str) or "@" not in image:
-        return None
-    return image.split("@", 1)[1]
+        return None, "not found in deployed Batch"
+    image = _deployed_batch_image(definitions[0])
+    if not isinstance(image, str) or not image:
+        return None, "no resolved image digest"
+    if "@" in image:
+        return image.split("@", 1)[1], None
+
+    # A tag with no digest. Parse the ECR registry URI: only an immutable-repo
+    # tag in the expected account/region is a stable identity we can resolve.
+    host, sep, path = image.partition("/")
+    if not sep or ":" not in path:
+        return None, f"image {image!r} has neither a tag nor a digest"
+    repository, tag = path.rsplit(":", 1)
+    host_parts = host.split(".")
+    if len(host_parts) < 5 or host_parts[1] != "dkr" or host_parts[2] != "ecr":
+        return None, f"image {image!r} is not an ECR registry"
+    account, host_region = host_parts[0], host_parts[3]
+    expected_repo = _bootstrap_repo(config.prod_account, config.bootstrap_qualifier, config.region)
+    if account != config.prod_account or host_region != config.region:
+        return None, (
+            f"image {image!r} is a different registry than expected "
+            f"({config.prod_account}.dkr.ecr.{config.region}.amazonaws.com/{expected_repo})"
+        )
+    repository_record = _describe_repository(repository, registry_id=account, region=host_region)
+    if not _repo_tag_is_immutable(repository_record, tag):
+        mutability = repository_record.get("imageTagMutability")
+        return None, (
+            f"image {image!r} is a tag in a mutable repository "
+            f"(imageTagMutability={mutability!r}); a tag is not a stable identity"
+        )
+    described = _describe_image(repository, tag, registry_id=account, region=host_region)
+    if described is None:
+        return None, f"image {image!r} tag {tag!r} not found in repository {repository!r}"
+    return _digest_of(described), None
 
 
 def _cmd_check_deployed(args: argparse.Namespace) -> int:
@@ -1047,7 +1193,10 @@ def _cmd_check_deployed(args: argparse.Namespace) -> int:
         if container.kind == "lambda":
             running = _resolved_lambda_digest(physical, config.region)
         else:
-            running = _resolved_batch_digest(physical, config.region)
+            running, reason = _resolved_batch_digest(physical, config)
+            if reason is not None:
+                problems.append(f"{name} ({physical}): {reason}")
+                continue
         if running is None:
             problems.append(f"{name} ({physical}): no resolved image digest")
             continue

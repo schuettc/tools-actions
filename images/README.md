@@ -46,6 +46,33 @@ A `lambda` image must be a single image manifest (Lambda rejects an OCI index);
 a `batch` image may be any shape. The rule is keyed on each image's config
 `deploy_target`.
 
+### `check-deployed` and Batch tags
+
+Lambda reports a `Code.ResolvedImageUri` — the account resolves the tag to a
+digest for you. **AWS Batch does not**: `describe-job-definitions` echoes the
+image string verbatim and never resolves a tag. So `check-deployed` must resolve
+a Batch image itself, and how it does that depends on the image's shape:
+
+- `<repo>@sha256:…` (with or without a leading `:tag`) — the digest is used
+  directly and must equal the expected (promoted) dev digest.
+- `<repo>:tag` (a bare tag, no digest) — CDK's
+  `ContainerImage.fromDockerImageAsset` renders `<bootstrap-repo>:<asset-hash>`.
+  A tag is normally not a stable identity, but the CDK bootstrap
+  `cdk-<qualifier>-container-assets-<account>-<region>` repo is created
+  **IMMUTABLE**, so that tag is write-once and *is* a stable identity. The tag is
+  accepted only if all three hold: (1) the repo's `imageTagMutability` is
+  `IMMUTABLE` (or `IMMUTABLE_WITH_EXCLUSION` with no exclusion filter matching
+  the tag), (2) the tag resolves to a digest via `ecr describe-images`, and
+  (3) that digest equals the expected dev digest. Otherwise it fails loudly,
+  naming the job definition, the image string and the reason — a mutable repo, a
+  tag not found, or a digest mismatch.
+- anything else (no tag and no digest, or a registry/account other than the
+  expected one) fails.
+
+The account and region for the `ecr describe-repositories` / `ecr
+describe-images` reads come from the config and the image's registry URI; they
+are never hardcoded.
+
 ## Inputs
 
 | Input | Required | Default | Description |
@@ -162,7 +189,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: schuettc/tools-actions/images@v0.9.2
+      - uses: schuettc/tools-actions/images@v0.9.3
         with:
           command: build
           cdk-out: cdk.out
@@ -178,14 +205,14 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: schuettc/tools-actions/images@v0.9.2
+      - uses: schuettc/tools-actions/images@v0.9.3
         with:
           command: build
           cdk-out: cdk.out
           setup-buildx: "true"
           ecr-login-accounts: "111111111111"
           args: --mode push --cache readwrite --registry 111111111111.dkr.ecr.us-east-1.amazonaws.com/cdk-hnb659fds-container-assets-111111111111-us-east-1
-      - uses: schuettc/tools-actions/images@v0.9.2
+      - uses: schuettc/tools-actions/images@v0.9.3
         with:
           command: assert-present
           cdk-out: cdk.out
@@ -206,18 +233,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - id: promote
-        uses: schuettc/tools-actions/images@v0.9.2
+        uses: schuettc/tools-actions/images@v0.9.3
         with:
           command: promote
           cdk-out: cdk.out
           ecr-login-accounts: "111111111111 222222222222"
-      - uses: schuettc/tools-actions/images@v0.9.2
+      - uses: schuettc/tools-actions/images@v0.9.3
         with:
           command: assert-present
           cdk-out: cdk.out
           ecr-login-accounts: "222222222222"
           args: --account 222222222222
-      - uses: schuettc/tools-actions/images@v0.9.2
+      - uses: schuettc/tools-actions/images@v0.9.3
         with:
           command: check-deployed
           cdk-out: cdk.out
@@ -229,5 +256,5 @@ jobs:
 Pin this action to an exact release tag, never a branch:
 
 ```yaml
-- uses: schuettc/tools-actions/images@v0.9.2
+- uses: schuettc/tools-actions/images@v0.9.3
 ```
