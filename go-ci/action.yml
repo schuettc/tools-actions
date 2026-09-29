@@ -42,21 +42,18 @@ runs:
     - name: Install pinned golangci-lint
       if: inputs.lint == 'true'
       shell: bash
-      env:
-        # golangci-lint v2.12.2, checksums from its release's checksums.txt.
-        # Bump the version and all four sums together.
-        GCL_VERSION: "2.12.2"
-        SHA_LINUX_AMD64: 8df580d2670fed8fa984aac0507099af8df275e665215f5c7a2ae3943893a553
-        SHA_LINUX_ARM64: 44cd40a8c76c86755375adfeea52cfd3533cb43d7bd647771e0ae065e166df3a
-        SHA_DARWIN_AMD64: f6f06d94b6241521c53d15450c5209b028270bf966f842afb11c030c79f5bc16
-        SHA_DARWIN_ARM64: a9c54498731b3128f79e090be6110f3e5fffccc617b08142ed244d4126c73f29
       run: |
+        # Version and per-platform checksums come from golangci-lint.lock, the
+        # same file local.sh uses, so CI and `just verify` run one linter.
         set -euo pipefail
+        lock="$GITHUB_ACTION_PATH/golangci-lint.lock"
+        v="$(awk '$1=="version"{print $2}' "$lock")"
         os="$(uname -s | tr '[:upper:]' '[:lower:]')"
         case "$(uname -m)" in arm64|aarch64) arch=arm64;; *) arch=amd64;; esac
-        var="SHA_$(echo "${os}_${arch}" | tr '[:lower:]' '[:upper:]')"; want="${!var}"
-        name="golangci-lint-${GCL_VERSION}-${os}-${arch}"
-        curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v${GCL_VERSION}/${name}.tar.gz" -o "$RUNNER_TEMP/gcl.tar.gz"
+        want="$(awk -v k="$os-$arch" '$1==k{print $2}' "$lock")"
+        [ -n "$want" ] || { echo "::error::golangci-lint.lock has no checksum for $os-$arch"; exit 1; }
+        name="golangci-lint-${v}-${os}-${arch}"
+        curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v${v}/${name}.tar.gz" -o "$RUNNER_TEMP/gcl.tar.gz"
         got="$( (shasum -a 256 "$RUNNER_TEMP/gcl.tar.gz" 2>/dev/null || sha256sum "$RUNNER_TEMP/gcl.tar.gz") | awk '{print $1}')"
         [ "$got" = "$want" ] || { echo "::error::golangci-lint checksum mismatch ($got)"; exit 1; }
         tar -xzf "$RUNNER_TEMP/gcl.tar.gz" -C "$RUNNER_TEMP"

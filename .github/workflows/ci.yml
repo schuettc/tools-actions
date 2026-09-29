@@ -152,3 +152,6 @@ jobs:
         env:
           REAL_GOLANGCI_LINT: /usr/local/bin/golangci-lint
         run: bash go-ci/tests/test.sh
+      - name: go-ci local runner tests
+        shell: bash
+        run: bash go-ci/tests/local.sh
