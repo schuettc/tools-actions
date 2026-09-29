@@ -17,6 +17,7 @@ record argv rather than shelling out to docker/aws.
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1197,14 +1198,35 @@ class _BatchDeployedRun:
     """A fake ``_run`` for check-deployed against Batch job definitions.
 
     ``describe-stack-resource`` -> a job-definition ARN; ``batch
-    describe-job-definitions`` -> a containerProperties.image whose ``@<digest>``
-    comes from ``running`` (keyed by job-definition physical name), or no digest
-    when ``unresolvable`` names it.
+    describe-job-definitions`` -> a running container image.
+
+    Each job's image is chosen from ``images`` (keyed by job-definition physical
+    name), one of:
+
+    * ``("digest", "sha256:...")`` -> ``<repo>@sha256:...`` (Batch's own
+      digest form) — resolved to that digest directly, no ECR call.
+    * ``("tag", "<tag>")`` -> ``<repo>:<tag>`` (a bare tag, no digest) —
+      forces the immutable-repo path.
+    * ``("ecs", "sha256:...")`` -> an ``ecsProperties`` multi-container shape
+      carrying ``<repo>@sha256:...``.
+
+    ``ecr describe-repositories`` answers with ``mutability`` (default IMMUTABLE);
+    ``ecr describe-images`` resolves a tag to ``tag_digests[tag]`` or, when the
+    tag is absent from that table, an ``ImageNotFoundException`` failure.
     """
 
-    def __init__(self, running: dict[str, str], *, unresolvable: set[str] | None = None) -> None:
-        self.running = running
-        self.unresolvable = set(unresolvable or set())
+    def __init__(
+        self,
+        images: dict[str, tuple[str, str]],
+        *,
+        mutability: str = "IMMUTABLE",
+        exclusion_filters: list[dict[str, str]] | None = None,
+        tag_digests: dict[str, str] | None = None,
+    ) -> None:
+        self.images = images
+        self.mutability = mutability
+        self.exclusion_filters = exclusion_filters
+        self.tag_digests = dict(tag_digests or {})
         self.calls: list[list[str]] = []
 
     def __call__(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -1217,56 +1239,593 @@ class _BatchDeployedRun:
         if "describe-job-definitions" in cmd:
             arn = cmd[cmd.index("--job-definitions") + 1]
             logical = arn.rsplit("/", 1)[1].rsplit(":", 1)[0]
-            if logical in self.unresolvable:
-                image = f"{PROD_REGISTRY}:{BATCH_HASH}"  # a tag, no @digest
-            else:
-                image = f"{PROD_REGISTRY}@{self.running[logical]}"
-            body = {"jobDefinitions": [{"containerProperties": {"image": image}}]}
+            kind, value = self.images[logical]
+            if kind == "digest":
+                props = {"containerProperties": {"image": f"{PROD_REGISTRY}@{value}"}}
+            elif kind == "tag":
+                props = {"containerProperties": {"image": f"{PROD_REGISTRY}:{value}"}}
+            elif kind == "ecs":
+                props = {
+                    "ecsProperties": {
+                        "taskProperties": [
+                            {"containers": [{"image": f"{PROD_REGISTRY}@{value}"}]}
+                        ]
+                    }
+                }
+            else:  # pragma: no cover - test misuse
+                raise AssertionError(f"unknown image kind {kind!r}")
+            body = {"jobDefinitions": [props]}
             return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
+        if "describe-repositories" in cmd:
+            record: dict[str, Any] = {"imageTagMutability": self.mutability}
+            if self.exclusion_filters is not None:
+                record["imageTagMutabilityExclusionFilters"] = self.exclusion_filters
+            body = {"repositories": [record]}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
+        if "describe-images" in cmd:
+            tag = cmd[cmd.index("--image-ids") + 1].split("=", 1)[1]
+            if tag not in self.tag_digests:
+                raise images.RunError(
+                    cmd, 254, "", "An error occurred (ImageNotFoundException) ..."
+                )
+            details = {"imageDetails": [{"imageDigest": self.tag_digests[tag]}]}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(details), "")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
 
-def test_check_deployed_batch_job_definition_ok_and_mismatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # Uses the static Batch fixture: three job definitions whose images are a
-    # plain string, an Fn::Sub and an Fn::Join, all of the same asset hash.
+BATCH_TAG = "batchtag"
+
+
+def _batch_cdk_out(tmp_path: Path) -> Path:
+    # The static Batch fixture: three job definitions whose images are a plain
+    # string, an Fn::Sub and an Fn::Join, all of the same asset hash.
     cdk_out = tmp_path / "cdk.out"
     cdk_out.mkdir()
     (cdk_out / "Batch-prod.template.json").write_text(
         (FIXTURES_CDK_OUT / "batch" / "Batch-prod.template.json").read_text()
     )
+    return cdk_out
+
+
+def test_check_deployed_batch_digest_form_ok_and_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The Batch digest form (`<repo>@sha256:...`) is unchanged: resolved directly
+    # with no ECR describe call.
+    cdk_out = _batch_cdk_out(tmp_path)
     cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
     dev_digests = {BATCH_HASH: "sha256:batch"}
 
-    # ok: every job definition runs the dev digest (all three shapes resolve).
-    rec = _BatchDeployedRun(running={j: "sha256:batch" for j in BATCH_JOBS})
+    rec = _BatchDeployedRun(images={j: ("digest", "sha256:batch") for j in BATCH_JOBS})
     monkeypatch.setattr(images, "_run", rec)
     assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 0
     out = capsys.readouterr().err
     for job in BATCH_JOBS:
         assert job in out
+    assert not any("describe-repositories" in c for c in rec.calls)
 
-    # mismatch: one job definition runs a stale digest -> FAIL naming it.
-    running = {j: "sha256:batch" for j in BATCH_JOBS}
-    running["JobJoin3C"] = "sha256:STALE"
-    rec2 = _BatchDeployedRun(running=running)
+    running = {j: ("digest", "sha256:batch") for j in BATCH_JOBS}
+    running["JobJoin3C"] = ("digest", "sha256:STALE")
+    rec2 = _BatchDeployedRun(images=running)
     monkeypatch.setattr(images, "_run", rec2)
     assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
     err = capsys.readouterr().err
     assert "JobJoin3C" in err
     assert "sha256:STALE" in err
 
-    # unresolvable: a job definition whose deployed image carries no digest ->
-    # FAIL naming that job definition.
-    rec3 = _BatchDeployedRun(
-        running={j: "sha256:batch" for j in BATCH_JOBS}, unresolvable={"JobSub2B"}
-    )
-    monkeypatch.setattr(images, "_run", rec3)
+
+def test_check_deployed_batch_no_tag_no_digest_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An image with neither a tag nor a digest is unresolvable and named.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(images={j: ("digest", "sha256:batch") for j in BATCH_JOBS})
+
+    def fake(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "describe-job-definitions" in cmd:
+            body = {"jobDefinitions": [{"containerProperties": {"image": PROD_REGISTRY}}]}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
+        return rec(cmd, **kwargs)
+
+    monkeypatch.setattr(images, "_run", fake)
     assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
     err = capsys.readouterr().err
-    assert "JobSub2B" in err
+    assert "neither a tag nor a digest" in err
+
+
+def test_check_deployed_batch_immutable_tag_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A bare tag in an IMMUTABLE repo resolves to a digest that matches the dev
+    # digest -> ok.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(
+        images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS},
+        mutability="IMMUTABLE",
+        tag_digests={BATCH_TAG: "sha256:batch"},
+    )
+    monkeypatch.setattr(images, "_run", rec)
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 0
+    out = capsys.readouterr().err
+    for job in BATCH_JOBS:
+        assert job in out
+    # The immutable-repo path made both ECR calls, in the expected account.
+    assert any("describe-repositories" in c for c in rec.calls)
+    describe_images = [c for c in rec.calls if "describe-images" in c]
+    assert describe_images
+    assert all("--registry-id" in c and PROD_ACCOUNT in c for c in describe_images)
+
+
+def test_check_deployed_batch_immutable_tag_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A bare tag in an IMMUTABLE repo whose digest differs from dev -> FAIL.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(
+        images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS},
+        mutability="IMMUTABLE",
+        tag_digests={BATCH_TAG: "sha256:STALE"},
+    )
+    monkeypatch.setattr(images, "_run", rec)
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "sha256:STALE" in err
+    assert "expected dev digest sha256:batch" in err
+    for job in BATCH_JOBS:
+        assert job in err
+
+
+def test_check_deployed_batch_mutable_repo_fails_naming_mutability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A bare tag in a MUTABLE repo is refused, naming the mutability.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(
+        images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS},
+        mutability="MUTABLE",
+        tag_digests={BATCH_TAG: "sha256:batch"},
+    )
+    monkeypatch.setattr(images, "_run", rec)
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "mutable repository" in err
+    assert "MUTABLE" in err
+    # A mutable repo never resolves the tag: no describe-images call.
+    assert not any("describe-images" in c for c in rec.calls)
+
+
+def test_check_deployed_batch_tag_not_found_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A bare tag in an IMMUTABLE repo that does not resolve -> FAIL naming it.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(
+        images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS},
+        mutability="IMMUTABLE",
+        tag_digests={},  # tag absent -> ImageNotFoundException
+    )
+    monkeypatch.setattr(images, "_run", rec)
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "not found in repository" in err
+    assert BATCH_TAG in err
+
+
+def test_check_deployed_batch_ecs_properties_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The deployed multi-container ecsProperties shape's image resolves too.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(images={j: ("ecs", "sha256:batch") for j in BATCH_JOBS})
+    monkeypatch.setattr(images, "_run", rec)
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 0
+    out = capsys.readouterr().err
+    for job in BATCH_JOBS:
+        assert job in out
+
+
+def _batch_jobdefs_override(
+    rec: _BatchDeployedRun, jobdefs: list[dict[str, Any]]
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Wrap ``_BatchDeployedRun`` so ``describe-job-definitions`` returns ``jobdefs``.
+
+    The static fixture always renders an in-account ``PROD_REGISTRY`` image, so
+    the cross-account / malformed / empty-definition cases override only the
+    ``describe-job-definitions`` answer and delegate every other call (including
+    any ECR describe) to ``rec`` — so ``rec.calls`` still records whether an ECR
+    call was reached.
+    """
+
+    def fake(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "describe-job-definitions" in cmd:
+            body = {"jobDefinitions": jobdefs}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
+        return rec(cmd, **kwargs)
+
+    return fake
+
+
+def _batch_image_override(
+    rec: _BatchDeployedRun, image: str
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Wrap ``rec`` so every Batch job definition reports the raw ``image`` string."""
+    return _batch_jobdefs_override(rec, [{"containerProperties": {"image": image}}])
+
+
+def _no_ecr_call(rec: _BatchDeployedRun) -> bool:
+    return not any(
+        "describe-repositories" in c or "describe-images" in c for c in rec.calls
+    )
+
+
+def test_check_deployed_batch_cross_account_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A bare tag hosted in a different account than config.prod_account is refused
+    # before any ECR call — the registry never even gets described.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    other = f"333333333333.dkr.ecr.{REGION}.amazonaws.com/{PROD_REPO}:{BATCH_TAG}"
+    rec = _BatchDeployedRun(images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS})
+    monkeypatch.setattr(images, "_run", _batch_image_override(rec, other))
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "different registry than expected" in err
+    for job in BATCH_JOBS:
+        assert job in err
+    assert _no_ecr_call(rec)
+
+
+def test_check_deployed_batch_cross_region_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A bare tag hosted in a different region than config.region is refused
+    # before any ECR call.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    other = f"{PROD_ACCOUNT}.dkr.ecr.us-west-2.amazonaws.com/{PROD_REPO}:{BATCH_TAG}"
+    rec = _BatchDeployedRun(images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS})
+    monkeypatch.setattr(images, "_run", _batch_image_override(rec, other))
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "different registry than expected" in err
+    assert _no_ecr_call(rec)
+
+
+def test_check_deployed_batch_malformed_image_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Each malformed / non-ECR image string fails with its own message, and
+    # never reaches an ECR call.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    # A bare ``ubuntu:22.04``-style ref has a tag but no registry host: it is not
+    # an ECR reference (it does NOT lack a tag; M3). The lookalike hosts each
+    # fail the exact-host match: a ``.amazonaws.com.evil.io`` suffix, a wholly
+    # different suffix, a bare ``amazonaws.company`` suffix, an uppercased host,
+    # the ``.amazonaws.com.cn`` partition, and a ``dkr.ecr-fips`` FIPS host.
+    reg = f"{PROD_ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com"
+    cases = [
+        ("ubuntu:22.04", "is not an ECR registry reference"),
+        ("noslashimage:tag", "is not an ECR registry reference"),
+        ("host:5000/repo:tag", "is not an ECR registry"),
+        ("registry.example.com/repo:tag", "is not an ECR registry"),
+        (f"{reg}.evil.io/{PROD_REPO}:{BATCH_TAG}", "is not an ECR registry"),
+        (
+            f"{PROD_ACCOUNT}.dkr.ecr.{REGION}.evil.example/{PROD_REPO}:{BATCH_TAG}",
+            "is not an ECR registry",
+        ),
+        (
+            f"{PROD_ACCOUNT}.dkr.ecr.{REGION}.amazonaws.company/{PROD_REPO}:{BATCH_TAG}",
+            "is not an ECR registry",
+        ),
+        (f"{reg.upper()}/{PROD_REPO}:{BATCH_TAG}", "is not an ECR registry"),
+        (
+            f"{PROD_ACCOUNT}.dkr.ecr.cn-north-1.amazonaws.com.cn/{PROD_REPO}:{BATCH_TAG}",
+            "is not an ECR registry",
+        ),
+        (
+            f"{PROD_ACCOUNT}.dkr.ecr-fips.{REGION}.amazonaws.com/{PROD_REPO}:{BATCH_TAG}",
+            "is not an ECR registry",
+        ),
+    ]
+    for image, message in cases:
+        rec = _BatchDeployedRun(images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS})
+        monkeypatch.setattr(images, "_run", _batch_image_override(rec, image))
+        assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+        err = capsys.readouterr().err
+        assert message in err, f"{image!r} expected {message!r} in {err!r}"
+        assert _no_ecr_call(rec), f"{image!r} reached an ECR call"
+
+
+def test_check_deployed_batch_digest_form_validates_host_and_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # C1: the ``@digest`` path applies the SAME exact host/repo check as the tag
+    # path. A digest hosted in a non-ECR host, a lookalike, a different account,
+    # or a different repo is refused even though the digest itself would match.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    reg = f"{PROD_ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com"
+    cases = [
+        (f"evil.example/{PROD_REPO}@sha256:batch", "is not an ECR registry"),
+        (f"{reg}.evil.io/{PROD_REPO}@sha256:batch", "is not an ECR registry"),
+        (
+            f"333333333333.dkr.ecr.{REGION}.amazonaws.com/{PROD_REPO}@sha256:batch",
+            "different registry than expected",
+        ),
+        (f"{reg}/wrong-repo@sha256:batch", "not the expected bootstrap repository"),
+    ]
+    for image, message in cases:
+        rec = _BatchDeployedRun(images={j: ("digest", "sha256:batch") for j in BATCH_JOBS})
+        monkeypatch.setattr(images, "_run", _batch_image_override(rec, image))
+        assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+        err = capsys.readouterr().err
+        assert message in err, f"{image!r} expected {message!r} in {err!r}"
+        assert _no_ecr_call(rec), f"{image!r} reached an ECR call"
+
+
+def test_check_deployed_batch_wrong_repo_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # M2: a tag in the expected host but a repo other than the bootstrap repo is
+    # refused before any ECR call.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    other = f"{PROD_ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/some-other-repo:{BATCH_TAG}"
+    rec = _BatchDeployedRun(images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS})
+    monkeypatch.setattr(images, "_run", _batch_image_override(rec, other))
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "not the expected bootstrap repository" in err
+    assert PROD_REPO in err
+    assert _no_ecr_call(rec)
+
+
+def test_check_deployed_batch_aws_error_is_per_resource(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # M1: an AccessDenied from describe-repositories becomes a per-resource
+    # problem naming the job definition and error; the report continues over the
+    # other resources and the overall exit is nonzero (no traceback).
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(
+        images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS},
+        mutability="IMMUTABLE",
+        tag_digests={BATCH_TAG: "sha256:batch"},
+    )
+
+    def fake(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "describe-repositories" in cmd:
+            raise images.RunError(
+                cmd, 254, "", "An error occurred (AccessDeniedException) when calling ..."
+            )
+        return rec(cmd, **kwargs)
+
+    monkeypatch.setattr(images, "_run", fake)
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "AWS error resolving deployed image" in err
+    assert "AccessDeniedException" in err
+    # Every job definition is named; the report did not abort on the first.
+    for job in BATCH_JOBS:
+        assert job in err
+    assert err.count("AWS error resolving deployed image") == len(BATCH_JOBS)
+
+
+def test_check_deployed_batch_empty_image_details_is_per_resource(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # M1: describe-images returning an empty ``imageDetails`` list is a
+    # per-resource problem (not an IndexError traceback).
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(
+        images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS},
+        mutability="IMMUTABLE",
+        tag_digests={BATCH_TAG: "sha256:batch"},
+    )
+
+    def fake(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "describe-images" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"imageDetails": []}), "")
+        return rec(cmd, **kwargs)
+
+    monkeypatch.setattr(images, "_run", fake)
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "no image details" in err
+    for job in BATCH_JOBS:
+        assert job in err
+
+
+def test_check_deployed_batch_empty_definition_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # describe-job-definitions returns no definitions -> "not found in deployed
+    # Batch", before any ECR call.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS})
+    monkeypatch.setattr(images, "_run", _batch_jobdefs_override(rec, []))
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "not found in deployed Batch" in err
+    assert _no_ecr_call(rec)
+
+
+def test_check_deployed_batch_no_image_in_definition_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A definition with no image string -> "no resolved image digest", before any
+    # ECR call.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS})
+    monkeypatch.setattr(images, "_run", _batch_jobdefs_override(rec, [{"containerProperties": {}}]))
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
     assert "no resolved image digest" in err
+    assert _no_ecr_call(rec)
+
+
+def test_check_deployed_batch_exclusion_filter_matching_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # IMMUTABLE_WITH_EXCLUSION and a WILDCARD filter matching the tag -> the tag
+    # is mutable, so it is refused and the tag is never resolved.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(
+        images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS},
+        mutability="IMMUTABLE_WITH_EXCLUSION",
+        exclusion_filters=[
+            {
+                "filterType": "WILDCARD",
+                "filter": "batch*",
+            }
+        ],
+        tag_digests={BATCH_TAG: "sha256:batch"},
+    )
+    monkeypatch.setattr(images, "_run", rec)
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "mutable repository" in err
+    assert "IMMUTABLE_WITH_EXCLUSION" in err
+    assert not any("describe-images" in c for c in rec.calls)
+
+
+def test_check_deployed_batch_exclusion_filter_not_matching_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # IMMUTABLE_WITH_EXCLUSION and a WILDCARD filter that does NOT match the tag
+    # -> the tag is still immutable now, so it resolves and its digest matches.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(
+        images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS},
+        mutability="IMMUTABLE_WITH_EXCLUSION",
+        exclusion_filters=[
+            {
+                "filterType": "WILDCARD",
+                "filter": "other*",
+            }
+        ],
+        tag_digests={BATCH_TAG: "sha256:batch"},
+    )
+    monkeypatch.setattr(images, "_run", rec)
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 0
+    out = capsys.readouterr().err
+    for job in BATCH_JOBS:
+        assert job in out
+    assert any("describe-images" in c for c in rec.calls)
+
+
+def test_check_deployed_batch_exclusion_filter_null_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # IMMUTABLE_WITH_EXCLUSION with a null (not a list) filters field is not a
+    # shape we trust -> refuse. The fixture omits the key when it is None, so the
+    # explicit-null record is injected via a describe-repositories override.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(
+        images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS},
+        mutability="IMMUTABLE_WITH_EXCLUSION",
+        tag_digests={BATCH_TAG: "sha256:batch"},
+    )
+
+    def fake(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "describe-repositories" in cmd:
+            record = {
+                "imageTagMutability": "IMMUTABLE_WITH_EXCLUSION",
+                "imageTagMutabilityExclusionFilters": None,
+            }
+            body = {"repositories": [record]}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
+        return rec(cmd, **kwargs)
+
+    monkeypatch.setattr(images, "_run", fake)
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "mutable repository" in err
+    assert not any("describe-images" in c for c in rec.calls)
+
+
+def test_check_deployed_batch_exclusion_filter_non_list_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # IMMUTABLE_WITH_EXCLUSION with a non-list filters field is untrusted ->
+    # refuse, and the tag is never resolved.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    rec = _BatchDeployedRun(
+        images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS},
+        mutability="IMMUTABLE_WITH_EXCLUSION",
+        exclusion_filters="not-a-list",  # type: ignore[arg-type]
+        tag_digests={BATCH_TAG: "sha256:batch"},
+    )
+    monkeypatch.setattr(images, "_run", rec)
+    assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+    err = capsys.readouterr().err
+    assert "mutable repository" in err
+    assert not any("describe-images" in c for c in rec.calls)
+
+
+def test_check_deployed_batch_exclusion_filter_unknown_shape_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An exclusion filter whose shape we do not understand (a non-dict entry, or
+    # a non-WILDCARD type) is treated conservatively as matching -> refuse.
+    cdk_out = _batch_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, images_rows=BATCH_IMAGES)
+    dev_digests = {BATCH_HASH: "sha256:batch"}
+    for filters in (
+        ["not-a-dict"],
+        [
+            {
+                "filterType": "REGEX",
+                "filter": "batch.*",
+            }
+        ],
+    ):
+        rec = _BatchDeployedRun(
+            images={j: ("tag", BATCH_TAG) for j in BATCH_JOBS},
+            mutability="IMMUTABLE_WITH_EXCLUSION",
+            exclusion_filters=filters,  # type: ignore[arg-type]
+            tag_digests={BATCH_TAG: "sha256:batch"},
+        )
+        monkeypatch.setattr(images, "_run", rec)
+        assert images.main(_check_argv(cdk_out, cfg, dev_digests)) == 1
+        err = capsys.readouterr().err
+        assert "mutable repository" in err, f"{filters!r} -> {err!r}"
+        assert not any("describe-images" in c for c in rec.calls)
 
 
 def test_check_deployed_lambda_fixture_hash_extraction(tmp_path: Path) -> None:
