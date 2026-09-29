@@ -240,6 +240,47 @@ def test_multi_occurrence_description_counts_them() -> None:
     assert "2 occurrences rewritten" in desc_double
 
 
+def test_an_incidental_non_pin_mention_is_ignored_not_failed() -> None:
+    """A quoted string that merely STARTS with the package name but carries no
+    version operator (a keyword, a description) is not a pin. It must be left
+    untouched, and it must NOT be enrolled as an unrecognized occurrence that
+    hard-fails the bump — the regression this fix closes."""
+    text = (
+        '    keywords = ["bh-lake"]\n'
+        '    description = "bh-lake client"\n'
+        '    "bh-lake>=0.4.0,<1.0.0",\n'
+    )
+    new, desc = rewrite_pin(text, "bh-lake", "0.5.0")
+    assert '"bh-lake>=0.5.0,<1.0.0"' in new
+    assert 'keywords = ["bh-lake"]' in new  # incidental mention untouched
+    assert 'description = "bh-lake client"' in new  # incidental mention untouched
+    assert "1 occurrence rewritten" in desc
+
+
+def test_a_supported_pin_among_incidental_mentions_is_rewritten() -> None:
+    """With incidental non-pin mentions present, the one real pin is still found
+    and rewritten — enrolment keys on the operator, not the bare name."""
+    text = '    authors = ["bh-lake team"]\n    "bh-lake>=0.4.0,<1.0.0",\n'
+    new, _ = rewrite_pin(text, "bh-lake", "0.5.0")
+    assert new == '    authors = ["bh-lake team"]\n    "bh-lake>=0.5.0,<1.0.0",\n'
+
+
+def test_an_unsupported_pin_shape_fails_naming_its_line() -> None:
+    """A pin-SHAPED occurrence (it reaches a version operator) that is not one of
+    the three supported forms must still fail loudly, naming its line — extras,
+    whitespace around the operator and `~=` are real pins we cannot silently
+    skip."""
+    for bad in (
+        '    "bh-lake[extra]>=0.4.0,<1.0.0",\n',  # extras
+        '    "bh-lake >= 0.4.0",\n',  # whitespace around the operator
+        '    "bh-lake~=0.4.0",\n',  # compatible-release operator
+    ):
+        with pytest.raises(PinNotFoundError) as exc:
+            rewrite_pin(bad, "bh-lake", "0.5.0")
+        assert "Found instead" in str(exc.value)
+        assert "line 1" in str(exc.value)
+
+
 def test_rewrite_for_package_writes_both_occurrences_in_one_file(tmp_path: Any) -> None:
     """The mlb-dk file layout: both occurrences in one mapped file are written and
     the returned description counts them."""

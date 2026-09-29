@@ -62,12 +62,19 @@ _EXACT = r'"{pkg}==[0-9][^"]*"'
 #: last, because `_RANGE`'s prefix also matches the start of a ranged pin.
 _FLOOR_ONLY = r'"{pkg}>=[0-9][^,"<]*"'
 
-#: Any pin-shaped quoted string for the package — the enumerator of occurrences.
-#: EVERY match must resolve to one of the three shapes above; one that does not
-#: fails the rewrite (naming what was found), rather than being silently skipped.
+#: Any PIN-shaped quoted string for the package — the enumerator of occurrences.
+#: A pin is the package name, optional extras/whitespace, then a version
+#: operator (``==`` ``>=`` ``<=`` ``~=`` ``!=`` ``<`` ``>``) or a ``@`` direct
+#: reference. Only strings that reach such a marker are enrolled: an incidental
+#: mention that merely starts with the name (``"bh-lake"``, ``"bh-lake client"``)
+#: carries no operator and is ignored, not failed. EVERY enrolled match must
+#: still resolve to one of the three shapes above; one that does not (extras,
+#: whitespace around the operator, ``~=``, a ``@`` url) fails the rewrite (naming
+#: what was found) rather than being silently skipped — we never let a real pin
+#: through unbumped.
 #: The negative lookahead is a name boundary: a bump of ``lib-a`` must not enrol
 #: ``"lib-a-engine>=..."`` as an unrecognized occurrence and reject the release.
-_ANY = r'"{pkg}(?![A-Za-z0-9._-])[^"]*"'
+_ANY = r'"{pkg}(?![A-Za-z0-9._-])\s*(?:\[[^"\]]*\])?\s*(?:==|>=|<=|~=|!=|<|>|@)[^"]*"'
 
 #: The default config path when none is passed.
 _DEFAULT_CONFIG = Path("ci/bump/pins.toml")
@@ -276,7 +283,11 @@ def rewrite_pin(text: str, package: str, version: str) -> tuple[str, str]:
             f"`>=A` floor, or an exact `==A` pin. No {package} pin at all."
         )
 
-    classified: list[tuple[re.Match[str], str]] = []
+    # Classify each occurrence exactly ONCE, keeping its match alongside its
+    # outcome. An unsupported shape is collected (with its line) for a loud,
+    # single failure; a supported one carries the new pin string and description
+    # straight into the rebuild below -- no second classification pass.
+    outcomes: list[tuple[re.Match[str], tuple[str, str]]] = []
     unsupported: list[str] = []
     for match in matches:
         outcome = _classify_occurrence(match.group(0), package, version)
@@ -284,7 +295,7 @@ def rewrite_pin(text: str, package: str, version: str) -> tuple[str, str]:
             line = text.count("\n", 0, match.start()) + 1
             unsupported.append(f"{match.group(0)} (line {line})")
         else:
-            classified.append((match, outcome[1]))
+            outcomes.append((match, outcome))
 
     if unsupported:
         raise PinNotFoundError(
@@ -297,10 +308,7 @@ def rewrite_pin(text: str, package: str, version: str) -> tuple[str, str]:
     parts: list[str] = []
     cursor = 0
     descriptions: list[str] = []
-    for match in matches:
-        outcome = _classify_occurrence(match.group(0), package, version)
-        assert outcome is not None  # every occurrence proven supported above
-        new_pin, description = outcome
+    for match, (new_pin, description) in outcomes:
         parts.append(text[cursor : match.start()])
         parts.append(new_pin)
         cursor = match.end()
