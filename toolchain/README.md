@@ -117,7 +117,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: schuettc/tools-actions/toolchain@v0.10.0
+      - uses: schuettc/tools-actions/toolchain@v0.10.1
 ```
 
 To scan a subdirectory instead of the repo root, pass `root`:
@@ -130,7 +130,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: schuettc/tools-actions/toolchain@v0.10.0
+      - uses: schuettc/tools-actions/toolchain@v0.10.1
         with:
           root: services/api
 ```
@@ -140,5 +140,5 @@ jobs:
 Pin this action to an exact release tag, never a branch:
 
 ```yaml
-- uses: schuettc/tools-actions/toolchain@v0.10.0
+- uses: schuettc/tools-actions/toolchain@v0.10.1
 ```

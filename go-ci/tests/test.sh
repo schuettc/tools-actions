@@ -109,6 +109,17 @@ run "$W/bare/.worktrees/br"; rc=$?
 check "a worktree of a bare repo builds (no VCS stamping)" '[ $rc -eq 0 ] || { tail -3 "$W/log"; false; }'
 run "$W/m" PACKAGES=./cmd/...; rc=$?
 check "an explicit PACKAGES list is used as given" '[ $rc -eq 0 ]'
+# A library (tools-common) has no main package: go build -o <dir>/ refuses
+# ("no main packages to build"), so it is built without -o, which compiles
+# and discards. It must still be cross-built: a file that does not compile on
+# one target fails the gate on that target.
+rm -rf "${W:?}/lib"; mkdir -p "$W/lib"; printf 'module example.com/lib\n\ngo 1.22\n' > "$W/lib/go.mod"
+printf 'package lib\n\n// F is exported.\nfunc F() int { return 1 }\n' > "$W/lib/lib.go"
+run "$W/lib"; rc=$?
+check "a library (no main package) passes and still cross-builds" '[ $rc -eq 0 ] && grep -q "build linux/amd64" "$W/log" || { tail -3 "$W/log"; false; }'
+printf '//go:build linux\n\npackage lib\n\nfunc g() { notDefined() }\n' > "$W/lib/lib_linux.go"
+run "$W/lib"; rc=$?
+check "a library file that does not build on one target fails the cross-build" '[ $rc -ne 0 ] && grep -q "notDefined" "$W/log"'
 
 echo "== the family config itself (real golangci-lint)"
 if [ -n "${REAL_GOLANGCI_LINT:-}" ]; then
