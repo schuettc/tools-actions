@@ -35,7 +35,9 @@ jobs:
       - uses: schuettc/tools-actions/go-ci@v9.9.9
 YML
 mkdir -p "$W/bin"; printf '#!/bin/sh\necho "golangci-lint has version 2.12.2"\n' > "$W/bin/golangci-lint"; chmod +x "$W/bin/golangci-lint"
-run() { ( cd "$repo" && env PATH="$W/bin:$PATH" TOOLS_ACTIONS_BASE="file://$W/pub" XDG_CACHE_HOME="$W/cache" "$@" bash "$A/local.sh" ) > "$W/log" 2>&1; }
+# -u GOTOOLCHAIN: CI's setup-go exports GOTOOLCHAIN=local, which local.sh would
+# rightly keep; each case starts clean, as a developer's shell does.
+run() { ( cd "$repo" && env -u GOTOOLCHAIN PATH="$W/bin:$PATH" TOOLS_ACTIONS_BASE="file://$W/pub" XDG_CACHE_HOME="$W/cache" "$@" bash "$A/local.sh" ) > "$W/log" 2>&1; }
 
 echo "== runs the pinned version"
 run; rc=$?
