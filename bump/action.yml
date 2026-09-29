@@ -1,0 +1,472 @@
+name: Pin bump (relock + PR + auto-merge)
+description: >-
+  The consumer half of the automated producer-first release chain. Rewrites a
+  consumer pin to a published version via the ONE shared matcher (bump_pin.py),
+  relocks, opens a PR into the base branch, arms GitHub-native auto-merge,
+  supersedes older bump PRs, regenerates on a DIRTY/BEHIND conflict, and awaits
+  the outcome. On any un-merged outcome it fails so the reusable workflow's
+  stall step opens/updates the per-package stall issue. Every project fact
+  arrives as an input; bump_pin.py / bump_flow.py are stdlib-only and run under
+  the runner's own python3 (Python 3.12+).
+
+# This composite carries bump_pin.py / bump_flow.py beside it and invokes them
+# via $GITHUB_ACTION_PATH — never assumed on PATH or checked out elsewhere. The
+# on-failure/on-cancellation stall lives in the CALLING reusable workflow at the
+# job level, because a job-timeout cancellation does not run a composite's
+# post-failure steps; this action exposes $GITHUB_ACTION_PATH (BUMP_SCRIPTS) and
+# a computed BUMP_REASON so that job-level stall step can name what happened.
+inputs:
+  package:
+    description: "Package to pin (re-validated to a plausible package name here)."
+    required: true
+  version:
+    description: "Version to pin (re-validated to X.Y.Z here)."
+    required: true
+  check_consumer:
+    description: "Ask bump_pin --check whether this repo consumes the package (fan-out). true|false."
+    required: true
+  producer_release:
+    description: "Human hint naming the producer release to run first."
+    required: true
+  base_branch:
+    description: "Branch the bump PR targets (integration branch)."
+    required: true
+  app_client_id:
+    description: "GitHub App client id (a caller Actions variable)."
+    required: true
+  config:
+    description: "Path to the consumer-owned pins.toml."
+    required: false
+    default: "ci/bump/pins.toml"
+  private_index:
+    description: 'JSON {"kind":"codeartifact",...} or "" for a public index.'
+    required: false
+    default: ""
+  app_private_key:
+    description: "PEM private key of the release App (Contents R/W, Pull requests R/W, Actions R/W)."
+    required: true
+  index_role_arn:
+    description: "OIDC role for the private index token (required when private_index is set)."
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Expose the action dir so the reusable workflow's job-level stall step can
+    # run bump_flow.py after this composite fails or is cancelled. $GITHUB_ACTION_PATH
+    # persists for the job; env written here propagates to the whole job.
+    - name: Expose scripts path
+      id: expose
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "BUMP_SCRIPTS=$GITHUB_ACTION_PATH" >> "$GITHUB_ENV"
+
+    - name: Validate version + package
+      id: validate
+      shell: bash
+      env:
+        # repository_dispatch payloads are attacker-controllable in principle —
+        # NEVER interpolate them into run: scripts directly. They enter through
+        # env and are regex-validated before any use.
+        RAW_PACKAGE: ${{ inputs.package }}
+        RAW_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        if ! echo "$RAW_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          echo "::error::version '$RAW_VERSION' is not X.Y.Z — refusing."
+          exit 1
+        fi
+        # The package name reaches a shell and a filename, so constrain it to the
+        # charset a package name can legally use before it is used anywhere.
+        if ! echo "$RAW_PACKAGE" | grep -Eq '^[a-z0-9][a-z0-9._-]*$'; then
+          echo "::error::package '$RAW_PACKAGE' is not a plausible package name — refusing."
+          exit 1
+        fi
+        echo "PACKAGE=$RAW_PACKAGE" >> "$GITHUB_ENV"
+        echo "VERSION=$RAW_VERSION" >> "$GITHUB_ENV"
+
+    # App secrets are REQUIRED. A GITHUB_TOKEN-opened PR does not trigger CI
+    # (anti-recursion), so the bump would strand. Fail loudly (→ stall) if absent.
+    - name: Require App secrets
+      id: require_app
+      shell: bash
+      env:
+        HAVE_APP_SECRETS: ${{ inputs.app_client_id != '' && inputs.app_private_key != '' }}
+      run: |
+        set -euo pipefail
+        if [ "$HAVE_APP_SECRETS" != "true" ]; then
+          echo "::error::the release App client id / private key are not configured. A GITHUB_TOKEN-opened PR does not trigger CI (GitHub anti-recursion), so the bump would strand. Failing so the stall issue is opened — configure the App variable + secret."
+          exit 1
+        fi
+
+    # Mint a short-lived installation token for the branch push + PR create +
+    # merge, so the bump PR triggers CI (App-created PRs do; GITHUB_TOKEN PRs are
+    # anti-recursion filtered).
+    - name: Mint installation token
+      id: app_token
+      uses: actions/create-github-app-token@v3.2.0
+      with:
+        client-id: ${{ inputs.app_client_id }}
+        private-key: ${{ inputs.app_private_key }}
+        repositories: ${{ github.event.repository.name }}
+
+    # GH_TOKEN = App token for every WRITE (supersede close, PR create, merge).
+    # READ_TOKEN = the workflow GITHUB_TOKEN for READs of CI status, because the
+    # App installation token cannot see statusCheckRollup.
+    - name: Select tokens (App for writes, GITHUB_TOKEN for reads)
+      id: select
+      shell: bash
+      env:
+        APP_TOKEN: ${{ steps.app_token.outputs.token }}
+        READ_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        echo "GH_TOKEN=$APP_TOKEN" >> "$GITHUB_ENV"
+        echo "READ_TOKEN=$READ_TOKEN" >> "$GITHUB_ENV"
+
+    - name: Checkout base branch
+      id: checkout
+      uses: actions/checkout@v7.0.1
+      with:
+        ref: ${{ inputs.base_branch }}
+        token: ${{ steps.app_token.outputs.token }}
+
+    # "Is this repo a consumer of the package?" — asked once, of the SAME config
+    # + matcher the bump uses. Only fan-out callers set check_consumer.
+    #   0 -> pinned + rewritable, proceed
+    #   3 -> declared, file present, no pin   -> graceful skip
+    #   4 -> not declared AND pinned nowhere  -> graceful skip
+    #   1 -> stale config (pinned but undeclared, or mapped file missing) -> RED
+    - name: Is this repo a consumer of the package?
+      id: consumer
+      if: ${{ inputs.check_consumer == 'true' }}
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config }}
+      run: |
+        set -euo pipefail
+        CODE=0
+        python3 "$GITHUB_ACTION_PATH/bump_pin.py" --check "$PACKAGE" --config "$CONFIG" || CODE=$?
+        if [ "$CODE" -eq 0 ]; then
+          echo "${PACKAGE} is a consumer pin here — bumping."
+        elif [ "$CODE" -eq 3 ] || [ "$CODE" -eq 4 ]; then
+          echo "${PACKAGE} is not a rewritable consumer pin here (check=$CODE) — skipping, not an error."
+          echo "SKIP=true" >> "$GITHUB_ENV"
+        else
+          exit "$CODE"
+        fi
+
+    - name: Install uv
+      id: uv
+      if: ${{ env.SKIP != 'true' }}
+      uses: astral-sh/setup-uv@v10.2.0
+      with:
+        enable-cache: true
+        cache-suffix: ${{ github.workflow }}-${{ github.job }}
+
+    - name: Set up Python
+      id: py
+      if: ${{ env.SKIP != 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        uv python install
+
+    # Private-index auth runs ONLY when a private_index is configured.
+    - name: Parse private index
+      id: parse_index
+      if: ${{ env.SKIP != 'true' && inputs.private_index != '' }}
+      shell: bash
+      env:
+        PRIVATE_INDEX: ${{ inputs.private_index }}
+      run: |
+        set -euo pipefail
+        python3 - <<'PY' >> "$GITHUB_ENV"
+        import json, os
+        pi = json.loads(os.environ["PRIVATE_INDEX"])
+        if pi.get("kind") != "codeartifact":
+            raise SystemExit(f"unsupported private_index kind: {pi.get('kind')!r}")
+        for key in ("domain", "owner", "repository", "region"):
+            if key not in pi:
+                raise SystemExit(f"private_index missing key: {key}")
+        print(f"PI_DOMAIN={pi['domain']}")
+        print(f"PI_OWNER={pi['owner']}")
+        print(f"PI_REPOSITORY={pi['repository']}")
+        print(f"PI_REGION={pi['region']}")
+        PY
+
+    - name: Configure AWS credentials (OIDC)
+      id: oidc
+      if: ${{ env.SKIP != 'true' && inputs.private_index != '' }}
+      uses: aws-actions/configure-aws-credentials@v6.3.0
+      with:
+        role-to-assume: ${{ inputs.index_role_arn }}
+        aws-region: ${{ env.PI_REGION }}
+
+    - name: Verify PACKAGE==VERSION exists in the private index
+      id: verify
+      if: ${{ env.SKIP != 'true' && inputs.private_index != '' }}
+      shell: bash
+      env:
+        PRODUCER_RELEASE: ${{ inputs.producer_release }}
+      run: |
+        set -euo pipefail
+        if ! aws codeartifact describe-package-version \
+               --domain "$PI_DOMAIN" --domain-owner "$PI_OWNER" \
+               --repository "$PI_REPOSITORY" --format pypi \
+               --package "$PACKAGE" --package-version "$VERSION" >/dev/null; then
+          echo "::error::${PACKAGE}==${VERSION} is not in the private index — release the wheel first (${PRODUCER_RELEASE})."
+          exit 1
+        fi
+        echo "ok: ${PACKAGE}==${VERSION} present in ${PI_REPOSITORY}"
+
+    - name: Export private-index token for uv/pip
+      id: index_token
+      if: ${{ env.SKIP != 'true' && inputs.private_index != '' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        TOKEN=$(aws codeartifact get-authorization-token \
+          --domain "$PI_DOMAIN" --domain-owner "$PI_OWNER" \
+          --query authorizationToken --output text)
+        echo "::add-mask::$TOKEN"
+        NAME=$(echo "$PI_REPOSITORY" | tr 'a-z-' 'A-Z_')
+        HOST="${PI_DOMAIN}-${PI_OWNER}.d.codeartifact.${PI_REGION}.amazonaws.com"
+        {
+          echo "UV_INDEX_${NAME}_USERNAME=aws"
+          echo "UV_INDEX_${NAME}_PASSWORD=$TOKEN"
+          echo "PIP_EXTRA_INDEX_URL=https://aws:${TOKEN}@${HOST}/pypi/${PI_REPOSITORY}/simple/"
+        } >> "$GITHUB_ENV"
+
+    # Supersede strictly-older open bump PRs; step aside (exit 10) if a NEWER bump
+    # is already open. Writes use the App token.
+    - name: Supersede older open bump PRs
+      id: supersede
+      if: ${{ env.SKIP != 'true' }}
+      shell: bash
+      run: |
+        set -uo pipefail
+        set +e
+        OUT=$(python3 "$GITHUB_ACTION_PATH/bump_flow.py" \
+          supersede --repo "$GITHUB_REPOSITORY" --package "$PACKAGE" --version "$VERSION")
+        RC=$?
+        set -e
+        echo "$OUT"
+        if [ "$RC" -eq 10 ]; then
+          echo "A newer open bump for ${PACKAGE} exists — stepping aside, closing nothing."
+          echo "SKIP=true" >> "$GITHUB_ENV"
+        elif [ "$RC" -ne 0 ]; then
+          exit "$RC"
+        fi
+
+    # Build the branch, open/reuse the PR, arm native auto-merge, then AWAIT.
+    - name: Bump + relock, open PR, auto-merge, await outcome
+      id: bump
+      if: ${{ env.SKIP != 'true' }}
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config }}
+        PRODUCER_RELEASE: ${{ inputs.producer_release }}
+      run: |
+        set -euo pipefail
+        BRANCH="chore/bump-${PACKAGE}-${VERSION}"
+        # lock_command / post_lock_command are project config, not this code.
+        LOCK_CMD=$(python3 -c 'import tomllib,os,sys; print(tomllib.load(open(os.environ["CONFIG"],"rb")).get("lock_command",""))')
+        POST_LOCK_CMD=$(python3 -c 'import tomllib,os,sys; print(tomllib.load(open(os.environ["CONFIG"],"rb")).get("post_lock_command",""))')
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        BUILD_RESULT=""
+        build_branch() {
+          # Reset the bump branch to the CURRENT base, re-apply the pin via THE
+          # shared matcher (it preserves whatever ceiling it finds), relock, run
+          # any export, and force-push. Update the base remote-tracking ref
+          # EXPLICITLY: checkout narrows the fetch refspec, so a bare fetch leaves
+          # it stale and a regeneration would rebuild on the OLD base.
+          git fetch origin "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
+          # Cross-run resume: if the bump branch already exists remotely but was
+          # never fetched, --force-with-lease has no lease and the push is
+          # REJECTED. Fetch it (when present) so the lease matches the remote.
+          git fetch origin "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}" || true
+          git switch -C "$BRANCH" "origin/${BASE_BRANCH}"
+          python3 "$GITHUB_ACTION_PATH/bump_pin.py" set "$PACKAGE" "$VERSION" --config "$CONFIG"
+          if [ -n "$LOCK_CMD" ]; then
+            bash -c "${LOCK_CMD//\{package\}/$PACKAGE}"
+          fi
+          if [ -n "$POST_LOCK_CMD" ]; then
+            bash -c "$POST_LOCK_CMD"
+          fi
+          # Stage EXACTLY the files this bump may touch: the package's declared pin
+          # file(s) (always) plus any pins.toml stage_globs. Any OTHER changed path
+          # fails loudly (bump_pin stage), so a status-scoped commit stays a
+          # reviewable release commit, never a blanket `git add -A` sweep.
+          if [ -z "$(git status --porcelain)" ]; then
+            BUILD_RESULT="nodiff"
+            return 0
+          fi
+          python3 "$GITHUB_ACTION_PATH/bump_pin.py" stage "$PACKAGE" --config "$CONFIG"
+          git commit -m "chore(deps): bump ${PACKAGE} pin to >=${VERSION} + relock"
+          git push --force-with-lease origin "HEAD:${BRANCH}"
+          BUILD_RESULT="pushed"
+        }
+
+        arm_merge() {
+          # GitHub-native auto-merge: squash + delete the branch when every
+          # required check is green. Re-arming after a force-push is a no-op.
+          gh pr merge "$PR_URL" --auto --squash --delete-branch
+        }
+
+        resolve_stall() {
+          # The desired pin is already present (no-diff), so the chain is
+          # effectively done — close any STALE open stall issue for this package.
+          GH_TOKEN="$READ_TOKEN" \
+            python3 "$GITHUB_ACTION_PATH/bump_flow.py" resolve \
+              --repo "$GITHUB_REPOSITORY" --package "$PACKAGE" --version "$VERSION" \
+              --pr "${1:--}" --config "$CONFIG"
+        }
+
+        build_branch
+        if [ "$BUILD_RESULT" = "nodiff" ]; then
+          echo "${PACKAGE} pin already >= ${VERSION} on ${BASE_BRANCH} — no diff, nothing to bump."
+          resolve_stall
+          echo "SKIP=true" >> "$GITHUB_ENV"
+          exit 0
+        fi
+
+        # Open or reuse the PR (resume-safe).
+        PR_URL=$(gh pr list --head "$BRANCH" --base "$BASE_BRANCH" --state open --json url -q '.[0].url' || true)
+        if [ -z "$PR_URL" ]; then
+          PR_URL=$(gh pr create --base "$BASE_BRANCH" --head "$BRANCH" \
+            --title "chore(deps): bump ${PACKAGE} to ${VERSION}" \
+            --body "Automated pin bump + relock for the published wheel ${PACKAGE}==${VERSION} (via bump-pin.yml, ${PRODUCER_RELEASE}). Native auto-merge (squash) lands it when CI is green.")
+          echo "Opened PR: $PR_URL"
+        else
+          echo "Reusing open PR: $PR_URL"
+        fi
+        echo "PR_URL=$PR_URL" >> "$GITHUB_ENV"
+
+        arm_merge
+
+        # Await the outcome. READ_TOKEN (GITHUB_TOKEN) reads CI status; the App
+        # token cannot. Regenerate at most 3x on a DIRTY/BEHIND conflict.
+        REGEN=0
+        MAX_REGEN=3
+        while : ; do
+          set +e
+          AWAIT_OUT=$(GH_TOKEN="$READ_TOKEN" \
+            python3 "$GITHUB_ACTION_PATH/bump_flow.py" await \
+              --repo "$GITHUB_REPOSITORY" --package "$PACKAGE" \
+              --pr "$PR_URL" --timeout-min 20 --poll-sec 30)
+          RC=$?
+          set -e
+          echo "$AWAIT_OUT"
+          OUTCOME_WORD=$(printf '%s\n' "$AWAIT_OUT" | sed -n 's/^outcome=\([^ ]*\).*/\1/p')
+          DETAIL=$(printf '%s\n' "$AWAIT_OUT" | sed -n 's/^outcome=[^ ]* detail=//p')
+          if [ "$RC" -eq 0 ]; then
+            echo "Merged: $PR_URL"
+            break
+          elif [ "$RC" -eq 20 ]; then
+            if [ "$REGEN" -ge "$MAX_REGEN" ]; then
+              echo "AWAIT_OUTCOME=conflict: regenerations exhausted (${MAX_REGEN})" >> "$GITHUB_ENV"
+              echo "::error::${PACKAGE} bump PR still conflicted after ${MAX_REGEN} regenerations — stalling: $PR_URL"
+              exit 1
+            fi
+            REGEN=$((REGEN + 1))
+            echo "${PACKAGE} bump PR conflicted (${DETAIL:-DIRTY/BEHIND}) — regenerating from origin/${BASE_BRANCH} (attempt ${REGEN}/${MAX_REGEN})."
+            build_branch
+            if [ "$BUILD_RESULT" = "nodiff" ]; then
+              echo "${BASE_BRANCH} already at >= ${VERSION} after the conflict — nothing left to bump."
+              gh pr close "$PR_URL" \
+                --comment "pin already at >= ${VERSION} on ${BASE_BRANCH} — closing this superfluous bump PR." \
+                --delete-branch || true
+              resolve_stall "$PR_URL"
+              echo "SKIP=true" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            arm_merge
+          else
+            echo "AWAIT_OUTCOME=${OUTCOME_WORD:-failed}: ${DETAIL:-unmerged outcome}" >> "$GITHUB_ENV"
+            echo "::error::${PACKAGE} bump did not merge — ${AWAIT_OUT}"
+            exit 1
+          fi
+        done
+
+    - name: Resolve stall issue on merge
+      id: resolve
+      if: ${{ success() && env.SKIP != 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CONFIG: ${{ inputs.config }}
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/bump_flow.py" resolve \
+          --repo "$GITHUB_REPOSITORY" --package "$PACKAGE" --version "$VERSION" \
+          --pr "$PR_URL" --config "$CONFIG"
+
+    - name: Step summary
+      if: ${{ success() && env.SKIP != 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        {
+          echo "## ${PACKAGE} pin bumped to ${VERSION}"
+          echo ""
+          echo "${PR_URL} merged into ${BASE_BRANCH} on green CI (native auto-merge, squash)."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    # On this composite's own failure, derive the stall reason from the internal
+    # step outcomes (which are only visible here) and hand it up as BUMP_REASON so
+    # the reusable workflow's job-level stall step can name what failed. A
+    # job-timeout CANCELLATION does not run this step, so the job-level stall step
+    # detects cancelled() itself.
+    - name: Compute stall reason on failure
+      if: ${{ failure() }}
+      shell: bash
+      env:
+        O_VALIDATE: ${{ steps.validate.outcome }}
+        O_REQUIRE: ${{ steps.require_app.outcome }}
+        O_APP: ${{ steps.app_token.outcome }}
+        O_SELECT: ${{ steps.select.outcome }}
+        O_CHECKOUT: ${{ steps.checkout.outcome }}
+        O_CONSUMER: ${{ steps.consumer.outcome }}
+        O_UV: ${{ steps.uv.outcome }}
+        O_PY: ${{ steps.py.outcome }}
+        O_PARSE: ${{ steps.parse_index.outcome }}
+        O_OIDC: ${{ steps.oidc.outcome }}
+        O_VERIFY: ${{ steps.verify.outcome }}
+        O_INDEXTOKEN: ${{ steps.index_token.outcome }}
+        O_SUPERSEDE: ${{ steps.supersede.outcome }}
+        O_BUMP: ${{ steps.bump.outcome }}
+      run: |
+        set -euo pipefail
+        # An await failure already recorded AWAIT_OUTCOME; keep it.
+        REASON="${AWAIT_OUTCOME:-}"
+        if [ -z "$REASON" ]; then
+          for entry in \
+            "validate:$O_VALIDATE" \
+            "require-app-secrets:$O_REQUIRE" \
+            "mint-app-token:$O_APP" \
+            "select-tokens:$O_SELECT" \
+            "checkout:$O_CHECKOUT" \
+            "consumer-check:$O_CONSUMER" \
+            "install-uv:$O_UV" \
+            "setup-python:$O_PY" \
+            "parse-index:$O_PARSE" \
+            "aws-oidc:$O_OIDC" \
+            "verify-index:$O_VERIFY" \
+            "index-token:$O_INDEXTOKEN" \
+            "supersede:$O_SUPERSEDE" \
+            "bump-open-merge-await:$O_BUMP"; do
+            name="${entry%%:*}"
+            oc="${entry#*:}"
+            if [ "$oc" = "failure" ]; then
+              REASON="workflow step failed: $name"
+              break
+            fi
+          done
+        fi
+        [ -z "$REASON" ] && REASON="workflow failed (no step outcome captured)"
+        echo "BUMP_REASON=$REASON" >> "$GITHUB_ENV"
