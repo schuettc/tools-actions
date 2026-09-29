@@ -92,6 +92,24 @@ check "a compile error fails" '[ $rc -ne 0 ] && grep -q "undefined" "$W/log"'
 mkmod "$W/m" "$clean"; run "$W/m"
 check "the build writes nothing into the tree" '[ ! -e "$W/m/x" ]'
 
+echo "== repo layouts the family uses"
+# An npm dependency can ship Go source under node_modules; ./... would treat it
+# as one of the repo's packages. It must not reach vet, test or build.
+mkmod "$W/m" "$clean"; mkdir -p "$W/m/web/node_modules/dep/golang"
+printf 'package dep\n\nfunc f() { notDefined() }\n' > "$W/m/web/node_modules/dep/golang/x.go"
+run "$W/m"; rc=$?
+check "Go source under node_modules is not vetted, tested or built" '[ $rc -eq 0 ] || { tail -3 "$W/log"; false; }'
+# galley's layout: <repo>/.git is a bare repository and branches are worktrees
+# under <repo>/.worktrees/. Go's VCS stamping fails there (exit status 128);
+# the family stamps versions through ldflags, so the gate turns it off.
+rm -rf "$W/bare"; mkdir -p "$W/bare"; mkmod "$W/bare" "$clean"
+( cd "$W/bare" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm s \
+  && git config core.bare true && rm -rf cmd go.mod && git worktree add -q .worktrees/br ) >/dev/null 2>&1
+run "$W/bare/.worktrees/br"; rc=$?
+check "a worktree of a bare repo builds (no VCS stamping)" '[ $rc -eq 0 ] || { tail -3 "$W/log"; false; }'
+run "$W/m" PACKAGES=./cmd/...; rc=$?
+check "an explicit PACKAGES list is used as given" '[ $rc -eq 0 ]'
+
 echo "== the family config itself (real golangci-lint)"
 if [ -n "${REAL_GOLANGCI_LINT:-}" ]; then
   # Branch work in this family happens in <repo>/.worktrees/<branch>. The
@@ -111,6 +129,38 @@ if [ -n "${REAL_GOLANGCI_LINT:-}" ]; then
 else
   echo "  (skipped: set REAL_GOLANGCI_LINT to the pinned golangci-lint)"
 fi
+
+echo "== the gate itself, with the real golangci-lint"
+if [ -n "${REAL_GOLANGCI_LINT:-}" ]; then
+  # Through ci.sh, not golangci-lint directly: the package list ci.sh hands the
+  # linter must be one it can load. Import paths are not (it reports "0 issues"
+  # after failing to type-check anything), so a planted finding must surface.
+  mkmod "$W/r" 'package main
+
+import (
+	"errors"
+	"io"
+)
+
+func g() error { return errors.New("x") }
+
+func main() { _ = g() == io.EOF }'
+  mkdir -p "$W/r/web/node_modules/dep"; printf 'package dep\n' > "$W/r/web/node_modules/dep/x.go"; git -C "$W/r" init -q
+  ( cd "$W/r" && env PATH="$(dirname "$REAL_GOLANGCI_LINT"):$PATH" TARGETS=linux/amd64 RACE=false FAMILY_CONFIG="$A/golangci.yml" bash "$A/ci.sh" ) > "$W/log" 2>&1; rc=$?
+  check "a real finding fails the gate and is reported" '[ $rc -ne 0 ] && grep -q "errorlint" "$W/log" || { tail -5 "$W/log"; false; }'
+  mkmod "$W/r" "$clean"; mkdir -p "$W/r/internal/p"; printf 'package p\n\n// P is exported.\nfunc P() int { return 1 }\n' > "$W/r/internal/p/p.go"; git -C "$W/r" init -q
+  ( cd "$W/r" && env PATH="$(dirname "$REAL_GOLANGCI_LINT"):$PATH" TARGETS=linux/amd64 RACE=false FAMILY_CONFIG="$A/golangci.yml" bash "$A/ci.sh" ) > "$W/log" 2>&1; rc=$?
+  check "a clean multi-package module passes with no linter errors" '[ $rc -eq 0 ] && ! grep -q "level=error" "$W/log" || { tail -5 "$W/log"; false; }'
+fi
+# A linter that cannot load the code logs an error and still says "0 issues".
+cat > "$W/bin/golangci-lint" <<FAKE
+#!/usr/bin/env bash
+echo "golangci-lint \$*" >> "$W/lint-calls"
+case "\$1" in run) echo 'level=error msg="[linters_context] typechecking error: stat x: directory not found"'; echo "0 issues." ;; esac
+exit 0
+FAKE
+mkmod "$W/m" "$clean"; run "$W/m"; rc=$?
+check "a linter error fails the gate even when it reports 0 issues" '[ $rc -ne 0 ] && grep -qi "golangci-lint logged errors" "$W/log"'
 
 echo; echo "passed $pass, failed $failn"
 [ "$failn" -eq 0 ]
