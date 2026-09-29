@@ -14,7 +14,26 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: schuettc/tools-actions/go-ci@v0.2.2
+      - uses: schuettc/tools-actions/go-ci@v0.3.0
+```
+
+## The same gate locally
+
+`go-ci/local.sh` runs this gate on your machine at exactly the version your
+`ci.yml` pins (it reads the `go-ci@vX.Y.Z` pin, fetches that version's gate,
+family config and `golangci-lint.lock` into `~/.cache/tools-actions/`, and
+installs the locked golangci-lint if yours differs). Every repo's justfile
+calls it through one standard recipe, so `just verify` and CI cannot disagree:
+
+```just
+# The family Go gate, at the tools-actions version ci.yml pins (same as CI).
+gate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="$(grep -oE 'go-ci@v[0-9]+\.[0-9]+\.[0-9]+' .github/workflows/ci.yml | head -1 | cut -d@ -f2)"
+    f="${XDG_CACHE_HOME:-$HOME/.cache}/tools-actions/$v/go-ci/local.sh"
+    [ -f "$f" ] || { mkdir -p "$(dirname "$f")"; curl -fsSL "https://raw.githubusercontent.com/schuettc/tools-actions/$v/go-ci/local.sh" -o "$f"; }
+    bash "$f"
 ```
 
 Inputs: `packages` (default `./...`), `race`, `targets`, `lint`, `setup-go`, `go-version-file`.
