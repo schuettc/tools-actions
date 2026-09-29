@@ -1,0 +1,151 @@
+name: Track stale Dependabot PRs
+description: >-
+  Keeps ONE labelled tracking issue that lists every Dependabot PR left open past
+  a stale threshold. Automerge deliberately holds major-version PRs for human
+  review; this weekly sweep is what keeps the held ones from rotting silently.
+  It lists open Dependabot PRs, and — when any are older than the threshold —
+  opens or updates the tracking issue; when none remain it closes it. It NEVER
+  checks out or executes PR-controlled code. Every per-caller value is an input;
+  nothing about a calling project is baked in.
+
+# Security model (see README): this action is meant to run from a caller's
+# weekly `schedule` workflow, with a minimally elevated GITHUB_TOKEN
+# (contents: read, pull-requests: read, issues: write). It only reads PR metadata
+# and manages a single tracking issue; it never checks out the PR.
+inputs:
+  github-token:
+    description: >-
+      GITHUB_TOKEN elevated by the caller's `permissions:` (contents: read,
+      pull-requests: read, issues: write). Used by `gh` to list PRs and manage
+      the tracking issue.
+    required: true
+  stale-days:
+    description: >-
+      A Dependabot PR open longer than this many days is stale (its held update
+      is unattended-automation waste). Must be a positive integer.
+    required: false
+    default: "14"
+  label:
+    description: >-
+      The fixed label on the single tracking issue. Created (colour d93f0b) if it
+      does not already exist.
+    required: false
+    default: "dependency-stale"
+  issue-title:
+    description: >-
+      Base title of the tracking issue; the current stale count is appended as
+      ` (N)`. Must not be empty.
+    required: false
+    default: "Stale Dependabot PRs"
+
+runs:
+  using: composite
+  steps:
+    # A required/expected input that is empty or malformed is a misconfiguration,
+    # not a skip: the runner does not enforce composite `required:`, so validate
+    # loudly here before touching the repo.
+    - name: Guard - validate inputs
+      id: guard
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        STALE_DAYS: ${{ inputs.stale-days }}
+        LABEL: ${{ inputs.label }}
+        ISSUE_TITLE: ${{ inputs.issue-title }}
+      run: |
+        set -euo pipefail
+        if [ -z "$GH_TOKEN" ]; then
+          echo "::error::github-token is required and must not be empty (pass secrets.GITHUB_TOKEN)."
+          exit 1
+        fi
+        if ! printf '%s' "$STALE_DAYS" | grep -Eqx '[0-9]+' || [ "$STALE_DAYS" -le 0 ]; then
+          echo "::error::stale-days must be a positive integer, got '$STALE_DAYS'."
+          exit 1
+        fi
+        if [ -z "$(printf '%s' "$LABEL" | tr -d '[:space:]')" ]; then
+          echo "::error::label must not be empty or whitespace-only."
+          exit 1
+        fi
+        if [ -z "$(printf '%s' "$ISSUE_TITLE" | tr -d '[:space:]')" ]; then
+          echo "::error::issue-title must not be empty or whitespace-only."
+          exit 1
+        fi
+
+    # The sweep. Any Dependabot PR open past the threshold is itself
+    # unattended-automation waste — patch/minor/digest updates auto-merge as soon
+    # as the gate is green, so anything still open (a held major) needs a human.
+    # All values reach the script through env; no ${{ }} in run.
+    - name: Open, update or close the stale Dependabot PRs issue
+      id: sweep
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        STALE_DAYS: ${{ inputs.stale-days }}
+        LABEL: ${{ inputs.label }}
+        ISSUE_TITLE: ${{ inputs.issue-title }}
+      run: |
+        set -euo pipefail
+        cutoff="$(date -u -d "${STALE_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ)"
+
+        # Fail loudly if gh errors.
+        if ! prs="$(gh pr list --repo "$REPO" --state open --limit 200 \
+              --json number,title,url,createdAt,author)"; then
+          echo "::error::gh pr list failed for $REPO"
+          exit 1
+        fi
+        stale="$(printf '%s' "$prs" | jq --arg c "$cutoff" \
+          '[.[] | select(.author.login == "app/dependabot" or .author.login == "dependabot[bot]") | select(.createdAt < $c)]')"
+        count="$(printf '%s' "$stale" | jq 'length')"
+
+        # The single tracking issue carries a fixed label. Capture gh's output
+        # first so a gh failure (non-zero) is distinguishable from the label
+        # simply being absent — fail loudly on error, only then test membership.
+        if ! names="$(gh label list --repo "$REPO" --json name --jq '.[].name')"; then
+          echo "::error::gh label list failed for $REPO"
+          exit 1
+        fi
+        # -F: the label is user input, so match it literally, never as a regex.
+        if ! printf '%s\n' "$names" | grep -Fqx -- "$LABEL"; then
+          if ! gh label create "$LABEL" --repo "$REPO" --color "d93f0b" \
+                --description "Dependabot PR left open past the stale threshold"; then
+            echo "::error::failed to create label $LABEL"
+            exit 1
+          fi
+        fi
+
+        if ! issue="$(gh issue list --repo "$REPO" --state open --label "$LABEL" \
+              --json number --jq '.[0].number // empty')"; then
+          echo "::error::gh issue list failed for $REPO"
+          exit 1
+        fi
+
+        if [ "$count" -gt 0 ]; then
+          title="${ISSUE_TITLE} (${count})"
+          body="$(printf '%s' "$stale" | jq -r \
+            '"These Dependabot PRs have been open longer than '"${STALE_DAYS}"' days and need attention:\n\n" + ([.[] | "- [#\(.number)](\(.url)) \(.title)"] | join("\n"))')"
+          if [ -n "$issue" ]; then
+            if ! gh issue edit "$issue" --repo "$REPO" --title "$title" --body "$body"; then
+              echo "::error::failed to update stale Dependabot PRs issue #$issue"
+              exit 1
+            fi
+            echo "Updated stale Dependabot PRs issue #$issue ($count PR(s))."
+          else
+            if ! gh issue create --repo "$REPO" --title "$title" --body "$body" --label "$LABEL"; then
+              echo "::error::failed to create the stale Dependabot PRs issue"
+              exit 1
+            fi
+            echo "Opened stale Dependabot PRs issue ($count PR(s))."
+          fi
+        else
+          if [ -n "$issue" ]; then
+            if ! gh issue close "$issue" --repo "$REPO" \
+                  --comment "No Dependabot PRs older than ${STALE_DAYS} days remain. Closing."; then
+              echo "::error::failed to close stale Dependabot PRs issue #$issue"
+              exit 1
+            fi
+            echo "Closed stale Dependabot PRs issue #$issue (nothing stale)."
+          else
+            echo "No stale Dependabot PRs and no open issue — nothing to do."
+          fi
+        fi

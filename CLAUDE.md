@@ -28,6 +28,13 @@ change here.
 
 - **One directory per action**, at the repo root, containing that action's
   `action.yml` and any scripts it runs.
+- A repo-root directory that is **not** an action (it has no `action.yml`, is
+  never a `uses:` target, and is never pinned or released) is allowed for shared
+  tooling — currently `testlib/`, the ONE copy of the test-only step-variable
+  guard that several actions' suites import. Such a directory must document, in
+  its own README, that it is not an action.
+- The `.github/workflows/` directory holds this repo's own CI/release workflows
+  and any published reusable workflows; it is not an action directory.
 - A composite action's scripts live **beside** its `action.yml` and are
   invoked relative to `$GITHUB_ACTION_PATH`, never assumed to be on `PATH`
   or checked out elsewhere.
