@@ -30,13 +30,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-# The reusable step-variable guard lives beside this test (copied from bump so
-# other actions can adopt it); import it straight from there.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from stepvars import undefined_run_vars  # noqa: E402
-
 ACTION_DIR = Path(__file__).resolve().parents[1]
 ACTION_YML = ACTION_DIR / "action.yml"
+REPO_ROOT = ACTION_DIR.parents[0]
+
+# The step-variable guard is shared test tooling (testlib/, not an action). Its
+# own behavioural tests live in testlib/tests; here we just adopt it.
+sys.path.insert(0, str(REPO_ROOT))
+from testlib.stepvars import undefined_run_vars  # noqa: E402
 
 # The exact set of inputs (and their defaults) the action exposes. ``None`` marks
 # a required input with no default.
