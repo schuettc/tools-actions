@@ -3,13 +3,14 @@
 CDK content-addresses container image assets: `cdk synth` writes
 `cdk.out/*.assets.json`, and each `dockerImages.<id>` entry is a hash over its
 staged context, Dockerfile, platform and build-secret *names*. This action runs
-the repo-local `images.py` against those manifests so an image is **built once
+its bundled `images.py` against those manifests so an image is **built once
 in CI**, verified, and **promoted dev→prod by digest** — never rebuilt for
 prod. It drives `docker buildx` and `aws ecr`; it owns no AWS credentials (the
 calling job configures its own role).
 
-`images.py` is stdlib-only (Python ≥3.11) and every project fact lives in a
-consumer-owned config file — the action embeds none.
+`images.py` is stdlib-only and runs under the runner's own `python3` (the action
+installs nothing); it requires **Python 3.12+** (tested on 3.12 and 3.14). Every
+project fact lives in a consumer-owned config file — the action embeds none.
 
 ## What it does
 
@@ -76,9 +77,13 @@ value is not shell-expanded, so it would reach `images.py` as the literal string
 ## The consumer-owned `ci/images/images.toml`
 
 Every project fact lives in this file; `images.py` is verbatim across
-consumers. The config loader validates it and fails loudly, naming the problem
-(a missing required key, a bad image key, a duplicate `(dockerfile, target)`
-pair, an out-of-set `deploy_target`).
+consumers. The config loader is the single validation point (there are no copier
+validators): it fails loudly, naming the problem — a missing required key, a
+value that is blank or the wrong type where a non-empty string is required
+(`region`, `bootstrap_qualifier`, `accounts.dev`, `accounts.prod`), an account
+id that is not 12 digits, a `cache_prefix` that is empty or uses invalid tag
+characters while `cache_repo` is set, a bad image key, an ambiguous
+`(dockerfile, target)` pair, or an out-of-set `deploy_target`.
 
 Schema:
 
@@ -88,8 +93,10 @@ Schema:
 - `cache_repo` (required, may be empty) — the ECR repo for the BuildKit layer
   cache; `""` disables caching (and any `--cache` other than `none` then fails
   loudly).
-- `cache_prefix` (required, may be empty) — a namespace prefixing each image's
-  cache key.
+- `cache_prefix` (required) — a namespace prefixing each image's cache key. It
+  may be empty only when `cache_repo` is empty; when `cache_repo` is set it must
+  be a non-empty string of valid Docker tag characters (it heads the tag
+  `<cache_prefix>-<key>`).
 - `[accounts]` `dev` / `prod` (both required) — dev and prod account ids;
   `prod` may equal `dev` for single-account projects.
 - `[[image]]` rows (at least one), each with:
@@ -104,7 +111,10 @@ Images are matched on the **(dockerfile suffix, build target)** pair: zero
 matches raises naming both; more than one raises `ambiguous` naming the
 candidate keys (there is no first-match-wins). So two images built from the
 *same* Dockerfile with different `--target`s map to distinct entries with
-distinct cache keys. A duplicate `(dockerfile, target)` pair is rejected at load.
+distinct cache keys. Ambiguous entries are rejected at load using the **same
+suffix-match rule** as the runtime matcher, so `Dockerfile` and
+`docker/Dockerfile` at the same target (both matchable by one asset) fail at
+load, not only at run time.
 
 ### A full worked example
 

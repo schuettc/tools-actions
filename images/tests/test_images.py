@@ -1387,10 +1387,44 @@ def test_ambiguous_config_raises(tmp_path: Path) -> None:
     with pytest.raises(images.ConfigError) as excinfo:
         images._load_config(_write_config(tmp_path, images_rows=rows))
     msg = str(excinfo.value)
-    assert "duplicate" in msg.lower()
+    assert "ambiguous" in msg.lower()
     assert SHARED_DOCKERFILE in msg
     assert "one" in msg
     assert "two" in msg
+
+
+def test_suffix_matched_dockerfiles_ambiguous_at_load(tmp_path: Path) -> None:
+    # M2: the load-time check uses the SAME suffix-match rule as `entry_for`, so
+    # a bare `Dockerfile` and a `docker/Dockerfile` at the SAME target — where a
+    # single asset `.../docker/Dockerfile` would match both — are rejected at
+    # load, not only at run time. Names both offending keys.
+    rows = [
+        {"key": "bare", "dockerfile": "Dockerfile", "target": "app", "deploy_target": "lambda"},
+        {
+            "key": "nested",
+            "dockerfile": "docker/Dockerfile",
+            "target": "app",
+            "deploy_target": "lambda",
+        },
+    ]
+    with pytest.raises(images.ConfigError) as excinfo:
+        images._load_config(_write_config(tmp_path, images_rows=rows))
+    msg = str(excinfo.value)
+    assert "ambiguous" in msg.lower()
+    assert "bare" in msg
+    assert "nested" in msg
+    # A DIFFERENT target with the same suffix collision is fine (distinct entries).
+    ok_rows = [
+        {"key": "bare", "dockerfile": "Dockerfile", "target": "app", "deploy_target": "lambda"},
+        {
+            "key": "nested",
+            "dockerfile": "docker/Dockerfile",
+            "target": "other",
+            "deploy_target": "lambda",
+        },
+    ]
+    cfg = images._load_config(_write_config(tmp_path, images_rows=ok_rows))
+    assert {e.key for e in cfg.images} == {"bare", "nested"}
 
 
 def test_entry_for_ambiguous_defensive_guard() -> None:
@@ -1461,6 +1495,101 @@ def test_config_rejects_bad_key_regex_and_deploy_target(tmp_path: Path) -> None:
     with pytest.raises(images.ConfigError) as excinfo:
         images._load_config(empty)
     assert "image" in str(excinfo.value)
+
+
+def _config_with_override(tmp_path: Path, **kwargs: str) -> Path:
+    # _config_text builds string values; use it for the empty-string cases.
+    cfg = tmp_path / "images.toml"
+    cfg.write_text(_config_text(**kwargs))
+    return cfg
+
+
+@pytest.mark.parametrize("key", ["region", "bootstrap_qualifier", "accounts.dev", "accounts.prod"])
+def test_config_rejects_empty_required_string(tmp_path: Path, key: str) -> None:
+    # I1: region / bootstrap_qualifier / accounts.dev / accounts.prod must be
+    # NON-EMPTY strings. A present-but-blank value fails at load naming the key,
+    # rather than silently producing a malformed registry / cache ref.
+    field = {
+        "region": "region",
+        "bootstrap_qualifier": "qualifier",
+        "accounts.dev": "dev",
+        "accounts.prod": "prod",
+    }[key]
+    cfg = _config_with_override(tmp_path, **{field: ""})
+    with pytest.raises(images.ConfigError) as excinfo:
+        images._load_config(cfg)
+    assert key in str(excinfo.value)
+    assert "non-empty" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("key", ["region", "bootstrap_qualifier", "accounts.dev", "accounts.prod"])
+def test_config_rejects_wrong_type_required_string(tmp_path: Path, key: str) -> None:
+    # I1: the same keys must be of type str. A number / bool value fails at load
+    # naming the key, never coerced via str().
+    lines: list[str] = [
+        'region = "us-east-1"',
+        'bootstrap_qualifier = "hnb659fds"',
+        'cache_repo = "example-buildcache"',
+        'cache_prefix = "example-repo"',
+    ]
+    accounts = ['dev = "111111111111"', 'prod = "222222222222"']
+    if key == "region":
+        lines[0] = "region = 123"
+    elif key == "bootstrap_qualifier":
+        lines[1] = "bootstrap_qualifier = true"
+    elif key == "accounts.dev":
+        accounts[0] = "dev = 111111111111"
+    elif key == "accounts.prod":
+        accounts[1] = "prod = 222222222222"
+    text = (
+        "\n".join(lines)
+        + "\n[accounts]\n"
+        + "\n".join(accounts)
+        + '\n[[image]]\nkey = "svc"\ndockerfile = "'
+        + A_DOCKERFILE
+        + '"\ntarget = ""\ndeploy_target = "lambda"\n'
+    )
+    cfg = tmp_path / "images.toml"
+    cfg.write_text(text)
+    with pytest.raises(images.ConfigError) as excinfo:
+        images._load_config(cfg)
+    assert key in str(excinfo.value)
+
+
+@pytest.mark.parametrize("which", ["dev", "prod"])
+def test_config_rejects_non_12_digit_account(tmp_path: Path, which: str) -> None:
+    # I1: account ids must be exactly 12 digits. A short / non-numeric id fails
+    # at load naming accounts.<which>.
+    kwargs = {which: "12345"}
+    cfg = _config_with_override(tmp_path, **kwargs)
+    with pytest.raises(images.ConfigError) as excinfo:
+        images._load_config(cfg)
+    assert f"accounts.{which}" in str(excinfo.value)
+    assert "12-digit" in str(excinfo.value)
+    # A non-numeric 12-char value is also rejected.
+    cfg = _config_with_override(tmp_path, **{which: "abcdefghijkl"})
+    with pytest.raises(images.ConfigError) as excinfo:
+        images._load_config(cfg)
+    assert f"accounts.{which}" in str(excinfo.value)
+
+
+def test_config_requires_cache_prefix_when_cache_repo_set(tmp_path: Path) -> None:
+    # M6: an empty cache_prefix with a NON-empty cache_repo would yield the tag
+    # ':-<key>', which is not a valid Docker tag. Reject it at load.
+    cfg = _config_with_override(tmp_path, cache_repo="build-cache", cache_prefix="")
+    with pytest.raises(images.ConfigError) as excinfo:
+        images._load_config(cfg)
+    assert "cache_prefix" in str(excinfo.value)
+    # An invalid tag character in the prefix is likewise rejected.
+    cfg = _config_with_override(tmp_path, cache_repo="build-cache", cache_prefix="bad/prefix")
+    with pytest.raises(images.ConfigError) as excinfo:
+        images._load_config(cfg)
+    assert "cache_prefix" in str(excinfo.value)
+    # But an empty prefix is fine when cache_repo is also empty (no cache).
+    cfg = _config_with_override(tmp_path, cache_repo="", cache_prefix="")
+    loaded = images._load_config(cfg)
+    assert loaded.cache_repo == ""
+    assert loaded.cache_prefix == ""
 
 
 def test_build_push_without_registry_rejected_at_parse(

@@ -136,7 +136,7 @@ jobs:
           actionlint -version
       - name: Install test deps
         shell: bash
-        run: python -m pip install --disable-pip-version-check pytest pyyaml
+        run: python -m pip install --disable-pip-version-check pytest==9.1.1 pyyaml==6.0.3
       - name: images tests
         shell: bash
         run: python -m pytest images/tests -q

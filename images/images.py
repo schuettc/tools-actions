@@ -81,6 +81,13 @@ _DEFAULT_CONFIG = Path("ci/images/images.toml")
 # Config `image` entry `key` must be a lowercase dns-ish label.
 _KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
+# An AWS account id is exactly 12 decimal digits.
+_ACCOUNT_RE = re.compile(r"^[0-9]{12}$")
+
+# `cache_prefix` becomes the head of a Docker tag `<cache_prefix>-<key>`; it must
+# use valid Docker tag characters and start with an alphanumeric or underscore.
+_TAG_PREFIX_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+
 _DEPLOY_TARGETS = frozenset({"lambda", "batch"})
 
 # Manifest media types Lambda can deploy: a SINGLE image manifest. An OCI image
@@ -104,6 +111,36 @@ def _require(mapping: dict[str, object], key: str, *, where: str) -> object:
     if key not in mapping:
         raise ConfigError(f"images config: missing required key {where!r}")
     return mapping[key]
+
+
+def _dockerfiles_ambiguous(a: str, b: str) -> bool:
+    """Whether two config Dockerfiles could both match one asset via `entry_for`.
+
+    `entry_for` matches an asset Dockerfile ``d`` to a config entry ``e`` when
+    ``d == e.dockerfile`` or ``d.endswith("/" + e.dockerfile)``. Two config
+    entries collide when the same asset path could satisfy both: either the
+    paths are equal, or one is a ``/``-boundary suffix of the other (e.g.
+    ``Dockerfile`` vs ``docker/Dockerfile``).
+    """
+    return a == b or a.endswith("/" + b) or b.endswith("/" + a)
+
+
+def _require_str(mapping: dict[str, object], key: str, *, where: str) -> str:
+    """Return a required, non-empty string value or raise `ConfigError`.
+
+    The copier validators in v0.2.0 required these keys to be non-empty strings;
+    the loader is now the single enforcement point, so a value that is present
+    but blank or of the wrong type (e.g. ``region = ""`` or a number) must fail
+    loudly rather than silently producing a malformed registry/cache ref.
+    """
+    value = _require(mapping, key, where=where)
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"images config: {where!r} must be a non-empty string, got {type(value).__name__}"
+        )
+    if not value.strip():
+        raise ConfigError(f"images config: {where!r} must be a non-empty string")
+    return value
 
 
 @dataclass(frozen=True)
@@ -178,28 +215,58 @@ def _load_config(path: Path) -> Config:
     with path.open("rb") as fh:
         raw = tomllib.load(fh)
 
-    region = _require(raw, "region", where="region")
-    bootstrap_qualifier = _require(raw, "bootstrap_qualifier", where="bootstrap_qualifier")
+    region = _require_str(raw, "region", where="region")
+    bootstrap_qualifier = _require_str(raw, "bootstrap_qualifier", where="bootstrap_qualifier")
+    # cache_repo may be empty (no layer cache); cache_prefix is only required
+    # when cache_repo is set (see below).
     cache_repo = _require(raw, "cache_repo", where="cache_repo")
+    if not isinstance(cache_repo, str):
+        raise ConfigError(
+            f"images config: 'cache_repo' must be a string, got {type(cache_repo).__name__}"
+        )
     cache_prefix = _require(raw, "cache_prefix", where="cache_prefix")
+    if not isinstance(cache_prefix, str):
+        raise ConfigError(
+            f"images config: 'cache_prefix' must be a string, got {type(cache_prefix).__name__}"
+        )
+    # A non-empty cache_repo derives the tag `<cache_prefix>-<key>`; an empty or
+    # invalid prefix would yield `:-<key>`, which is not a valid Docker tag.
+    if cache_repo.strip():
+        if not cache_prefix.strip():
+            raise ConfigError(
+                "images config: 'cache_prefix' must be a non-empty string when "
+                "'cache_repo' is set (it heads the cache tag '<cache_prefix>-<key>')"
+            )
+        if not _TAG_PREFIX_RE.match(cache_prefix):
+            raise ConfigError(
+                f"images config: 'cache_prefix' {cache_prefix!r} must use valid Docker "
+                f"tag characters (match {_TAG_PREFIX_RE.pattern})"
+            )
     accounts = _require(raw, "accounts", where="accounts")
     if not isinstance(accounts, dict):
         raise ConfigError("images config: 'accounts' must be a table")
-    dev_account = _require(accounts, "dev", where="accounts.dev")
-    prod_account = _require(accounts, "prod", where="accounts.prod")
+    dev_account = _require_str(accounts, "dev", where="accounts.dev")
+    prod_account = _require_str(accounts, "prod", where="accounts.prod")
+    for label, account in (("accounts.dev", dev_account), ("accounts.prod", prod_account)):
+        if not _ACCOUNT_RE.match(account):
+            raise ConfigError(
+                f"images config: {label!r} {account!r} must be a 12-digit AWS account id"
+            )
 
     raw_images = _require(raw, "image", where="image")
     if not isinstance(raw_images, list) or not raw_images:
         raise ConfigError("images config: 'image' must be a non-empty array of tables")
 
     seen_keys: set[str] = set()
-    # Duplicate (dockerfile, target) pairs are rejected at load time: two
-    # [[image]] entries that match the same asset would make `entry_for`
-    # ambiguous. There is no copier validator any more, so the config loader is
-    # the single place that must reject a malformed images.toml, naming the
-    # offending keys. (`entry_for` keeps its own defensive ambiguity guard for
-    # directly-constructed Config objects.)
-    seen_pairs: dict[tuple[str, str], str] = {}
+    # Ambiguous [[image]] entries are rejected at load time: two entries that
+    # could both match the same asset would make `entry_for` ambiguous. The
+    # match uses the SAME rule as `entry_for` (suffix match on the Dockerfile
+    # plus an equal target), so `Dockerfile` and `docker/Dockerfile` at the same
+    # target — where an asset `.../docker/Dockerfile` matches both — are caught
+    # here rather than only at run time. There is no copier validator any more,
+    # so the loader is the single place that must reject a malformed
+    # images.toml, naming the offending keys. (`entry_for` keeps its own
+    # defensive ambiguity guard for directly-constructed Config objects.)
     entries: list[ImageEntry] = []
     for i, item in enumerate(raw_images):
         if not isinstance(item, dict):
@@ -218,18 +285,20 @@ def _load_config(path: Path) -> Config:
                 f"images config: image[{i}].deploy_target {deploy_target!r} "
                 f"must be one of {sorted(_DEPLOY_TARGETS)}"
             )
-        pair = (str(dockerfile), str(target))
-        if pair in seen_pairs:
-            raise ConfigError(
-                f"images config: duplicate [[image]] entries for Dockerfile {pair[0]!r} "
-                f"with build target {pair[1]!r}: keys {[seen_pairs[pair], key]}"
-            )
-        seen_pairs[pair] = key
+        dockerfile = str(dockerfile)
+        target = str(target)
+        for prior in entries:
+            if prior.target == target and _dockerfiles_ambiguous(prior.dockerfile, dockerfile):
+                raise ConfigError(
+                    f"images config: ambiguous [[image]] entries for Dockerfile "
+                    f"{dockerfile!r} with build target {target!r}: keys "
+                    f"{[prior.key, key]}"
+                )
         entries.append(
             ImageEntry(
                 key=key,
-                dockerfile=str(dockerfile),
-                target=str(target),
+                dockerfile=dockerfile,
+                target=target,
                 deploy_target=str(deploy_target),
             )
         )

@@ -100,6 +100,21 @@ def test_images_action_contract(action_doc: dict) -> None:
     assert "exit 1" in run_script
 
 
+def test_readme_pins_match_version() -> None:
+    # M5: every `schuettc/tools-actions/images@vX.Y.Z` pin in the README must
+    # equal `v` + the repo VERSION (mirrors fork-sync's snippet-pin test), so a
+    # release bump can never leave a stale pin in the docs.
+    root = ACTION_DIR.parents[0]
+    version = (root / "VERSION").read_text().strip()
+    readme = (ACTION_DIR / "README.md").read_text()
+    pins = re.findall(r"schuettc/tools-actions/images@v[\w.\-]+", readme)
+    assert pins, "README must pin schuettc/tools-actions/images@vX.Y.Z"
+    for pin in pins:
+        assert pin == f"schuettc/tools-actions/images@v{version}", (
+            f"{pin} does not match VERSION v{version}"
+        )
+
+
 def _run_images_script(action_doc: dict) -> str:
     """The bash body of the ``Run images.py`` step."""
     for step in action_doc["runs"]["steps"]:
@@ -227,6 +242,13 @@ def test_actionlint_on_caller_workflow(tmp_path: Path) -> None:
     shutil.copy(ACTION_DIR / "images.py", repo / "images" / "images.py")
     workflows = repo / ".github" / "workflows"
     workflows.mkdir(parents=True)
+    # actionlint only knows hosted-runner labels up to its release, so declare
+    # ubuntu-26.04 (as this repo's own .github/actionlint.yaml does) in the
+    # generated repo, else the caller's runs-on reads as an unknown label. The
+    # temp repo is not a git checkout, so pass the config explicitly with
+    # -config-file (auto-discovery only fires inside a git project).
+    config_file = repo / ".github" / "actionlint.yaml"
+    config_file.write_text("self-hosted-runner:\n  labels:\n    - ubuntu-26.04\n")
     caller = workflows / "caller.yml"
     caller.write_text(
         "\n".join(
@@ -236,7 +258,7 @@ def test_actionlint_on_caller_workflow(tmp_path: Path) -> None:
                 "  workflow_dispatch:",
                 "jobs:",
                 "  build:",
-                "    runs-on: ubuntu-latest",
+                "    runs-on: ubuntu-26.04",
                 "    steps:",
                 "      - uses: actions/checkout@v7.0.1",
                 "      - uses: ./images",
@@ -251,7 +273,7 @@ def test_actionlint_on_caller_workflow(tmp_path: Path) -> None:
     )
 
     result = subprocess.run(
-        [*runner, str(caller)],
+        [*runner, "-config-file", str(config_file), str(caller)],
         cwd=repo,
         capture_output=True,
         text=True,
