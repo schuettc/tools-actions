@@ -25,7 +25,7 @@
 # Optional env:
 #   TEST_CMD         command run (repo root) after the rebase, before anything is published.
 #   TEST_NODE_VERSIONS  space-separated Node versions TEST_CMD also runs on: majors ("24"),
-#                    "current" or "lts" (resolved from NODE_DIST_INDEX, default nodejs.org's).
+#                    "current" or "lts", from NODE_DIST_BASE (default https://nodejs.org/dist).
 #                    Must install its own deps. Failure = issue + no publish. A clean rebase
 #                    is not proof our patches still work; this is.
 #   BUILD_CMD        command run (repo root) before packing, when the package ships built output.
@@ -175,25 +175,36 @@ if [ -n "${TEST_CMD:-}" ]; then
   echo "Testing: ${TEST_CMD}"
   bash -c "$TEST_CMD"
   # Then again on each extra Node, so a fork is proven on the Node its users
-  # run, not only the job's. A spec is a major ("24"), or "current" / "lts":
-  # the newest release / newest LTS in nodejs.org's release index (the npm
-  # `node` package's own dist-tags lag: its "latest" is still 22). The binary
-  # comes from `npx node@<major>`. Any failure stops the run before anything
-  # is published.
+  # run, not only the job's. A spec is a major ("24": its newest release), or
+  # "current" / "lts": the newest release / newest LTS. All three resolve from
+  # nodejs.org's release index, and the binary is that release's official
+  # tarball, checked against its SHASUMS256.txt: the way setup-node gets Node.
+  # (The npm `node` package is no substitute: its dist-tags lag, and npm now
+  # blocks the install script that fetches its binary, so it silently runs the
+  # Node already on PATH.) The binary must report the version asked for. Any
+  # failure stops the run before anything is published.
+  dist="${NODE_DIST_BASE:-https://nodejs.org/dist}"
+  plat="$(uname -s | tr '[:upper:]' '[:lower:]')-$(case "$(uname -m)" in arm64|aarch64) echo arm64;; *) echo x64;; esac)"
   for spec in ${TEST_NODE_VERSIONS:-}; do
     PHASE="test (node@${spec})"
-    major="$spec"
-    case "$spec" in
-      current|lts)
-        major="$(curl -fsSL "${NODE_DIST_INDEX:-https://nodejs.org/dist/index.json}" | SPEC="$spec" node -e '
-          const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
-          const r = process.env.SPEC === "lts" ? d.find((x) => x.lts) : d[0];
-          if (!r) process.exit(1);
-          process.stdout.write(r.version.replace(/^v/, "").split(".")[0]);
-        ')" ;;
-    esac
-    bin="$(npx --yes "node@${major}" -p process.execPath)"
-    echo "Testing on node@${spec} ($("$bin" --version)): ${TEST_CMD}"
+    ver="$(curl -fsSL "$dist/index.json" | SPEC="$spec" node -e '
+      const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
+      const s = process.env.SPEC;
+      const r = s === "current" ? d[0] : s === "lts" ? d.find((x) => x.lts)
+        : d.find((x) => x.version.replace(/^v/, "").split(".")[0] === s);
+      if (!r) { console.error(`no Node release for "${s}"`); process.exit(1); }
+      process.stdout.write(r.version.replace(/^v/, ""));
+    ')"
+    name="node-v${ver}-${plat}"
+    ndir="$(mktemp -d)"
+    curl -fsSL "$dist/v${ver}/${name}.tar.gz" -o "$ndir/node.tgz"
+    want="$(curl -fsSL "$dist/v${ver}/SHASUMS256.txt" | awk -v f="${name}.tar.gz" '$2==f{print $1}')"
+    got="$( (sha256sum "$ndir/node.tgz" 2>/dev/null || shasum -a 256 "$ndir/node.tgz") | cut -d' ' -f1)"
+    [ -n "$want" ] && [ "$got" = "$want" ] || { echo "::error::node v${ver} ${plat}: checksum mismatch or not listed"; false; }
+    tar -xzf "$ndir/node.tgz" -C "$ndir"
+    bin="$ndir/$name/bin/node"
+    [ "$("$bin" --version)" = "v${ver}" ] || { echo "::error::node v${ver} reports $("$bin" --version)"; false; }
+    echo "Testing on node@${spec} (v${ver}): ${TEST_CMD}"
     PATH="$(dirname "$bin"):$PATH" bash -c "$TEST_CMD"
   done
 fi

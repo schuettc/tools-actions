@@ -57,19 +57,7 @@ case "$1 $2" in
   *) :;;
 esac
 EOF
-# npx node@<spec> -p process.execPath: print the path of a fake node for that
-# spec, whose --version is "v<spec>"; NPX_FAIL=<spec> makes one unavailable.
-cat > "$W/bin/npx" <<'NPX'
-#!/usr/bin/env bash
-echo "npx $(printf '%q ' "$@")" >> "$SHIM_LOG"
-spec=""; for a in "$@"; do case "$a" in node@*) spec="${a#node@}";; esac; done
-[ -n "$spec" ] || exit 2
-[ "${NPX_FAIL:-}" = "$spec" ] && { echo "npm ERR! notarget node@$spec" >&2; exit 1; }
-d="$SHIM_DIR/node-$spec/bin"; mkdir -p "$d"
-printf '#!/usr/bin/env bash\n[ "$1" = --version ] && { echo "v%s"; exit 0; }\nexec %q "$@"\n' "$spec" "$(command -v node)" > "$d/node"
-chmod +x "$d/node"; echo "$d/node"
-NPX
-chmod +x "$W/bin/npm" "$W/bin/gh" "$W/bin/npx"
+chmod +x "$W/bin/npm" "$W/bin/gh"
 
 git_q() { git -c init.defaultBranch=main -c user.name=t -c user.email=t@t "$@" >/dev/null 2>&1; }
 
@@ -139,29 +127,49 @@ for variant in root mono; do
   run PKG_DIR="$PKG_DIR_ENV" TEST_CMD="grep -q 'OUR PATCH' ${D:+$D/}src.txt"
   check "TEST_CMD passes: publishes" '[ $RC -eq 0 ] && [ -f "$S/published-package.json" ]'
 
-  # current / lts resolve from nodejs.org's release index (NODE_DIST_INDEX in
-  # tests): here current is 27 and the newest LTS 26. A major passes through.
-  printf '[{"version":"v27.1.0","lts":false},{"version":"v26.5.0","lts":"K"},{"version":"v25.9.0","lts":false}]' > "$W/node-index.json"
+  # A fake nodejs.org: dist/index.json (current 27.1.0, newest LTS 26.5.0,
+  # newest 24.x 24.3.0) and, per version, the platform tarball whose node
+  # reports that version, plus SHASUMS256.txt. 25.9.0's node lies about its
+  # version; 23.1.0's tarball does not match its checksum.
+  plat="$(uname -s | tr '[:upper:]' '[:lower:]')-$(case "$(uname -m)" in arm64|aarch64) echo arm64;; *) echo x64;; esac)"
+  if [ ! -f "$W/dist/index.json" ]; then
+    mkdir -p "$W/dist"
+    printf '[{"version":"v27.1.0","lts":false},{"version":"v26.5.0","lts":"K"},{"version":"v25.9.0","lts":false},{"version":"v24.3.0","lts":"J"},{"version":"v24.1.0","lts":"J"},{"version":"v23.1.0","lts":false}]' > "$W/dist/index.json"
+    for v in 27.1.0 26.5.0 25.9.0 24.3.0 23.1.0; do
+      n="node-v$v-$plat"; d="$W/dist/v$v"; mkdir -p "$d/$n/bin"
+      reports="v$v"; [ "$v" = 25.9.0 ] && reports="v22.0.0"
+      printf '#!/usr/bin/env bash\n[ "$1" = --version ] && { echo "%s"; exit 0; }\nexec %q "$@"\n' "$reports" "$(command -v node)" > "$d/$n/bin/node"
+      chmod +x "$d/$n/bin/node"
+      ( cd "$d" && tar -czf "$n.tar.gz" "$n" && rm -rf "$n" )
+      sum="$( (sha256sum "$d/$n.tar.gz" 2>/dev/null || shasum -a 256 "$d/$n.tar.gz") | cut -d' ' -f1)"
+      [ "$v" = 23.1.0 ] && sum="0000000000000000000000000000000000000000000000000000000000000000"
+      printf '%s  %s.tar.gz\n' "$sum" "$n" > "$d/SHASUMS256.txt"
+    done
+  fi
+  NODE_ENV_=(NODE_DIST_BASE="file://$W/dist")
+
   setup "$variant-testnodes" "$D"; export UP_PATH="$S/up"
   upstream_bump "$D" 1.5.1 0
-  run PKG_DIR="$PKG_DIR_ENV" NODE_DIST_INDEX="file://$W/node-index.json" TEST_NODE_VERSIONS="current lts 24" TEST_CMD="node --version >> $S/ran-on"
-  check "TEST_NODE_VERSIONS: TEST_CMD runs on the job's node, then each listed node (current, lts, a major)" '[ $RC -eq 0 ] && [ "$(sed -n 2,4p "$S/ran-on" | tr "\n" " ")" = "v27 v26 v24 " ] && [ "$(wc -l < "$S/ran-on")" -eq 4 ]'
+  run PKG_DIR="$PKG_DIR_ENV" "${NODE_ENV_[@]}" TEST_NODE_VERSIONS="current lts 24" TEST_CMD="node --version >> $S/ran-on"
+  check "TEST_NODE_VERSIONS: TEST_CMD runs on the job's node, then each listed node (current, lts, newest of a major)" '[ $RC -eq 0 ] && [ "$(sed -n 2,4p "$S/ran-on" | tr "\n" " ")" = "v27.1.0 v26.5.0 v24.3.0 " ] && [ "$(wc -l < "$S/ran-on")" -eq 4 ]'
   check "TEST_NODE_VERSIONS: publishes when every node passes" '[ -f "$S/published-package.json" ]'
 
   setup "$variant-testnodefail" "$D"; export UP_PATH="$S/up"
   upstream_bump "$D" 1.5.2 0
-  run PKG_DIR="$PKG_DIR_ENV" NODE_DIST_INDEX="file://$W/node-index.json" TEST_NODE_VERSIONS="current" TEST_CMD='[ "$(node --version)" != v27 ]'
+  run PKG_DIR="$PKG_DIR_ENV" "${NODE_ENV_[@]}" TEST_NODE_VERSIONS="current" TEST_CMD='[ "$(node --version)" != v27.1.0 ]'
   check "TEST_NODE_VERSIONS: a failure on a listed node publishes nothing and names it" '[ $RC -ne 0 ] && ! grep -q "npm publish" "$SHIM_LOG" && grep -q "node@current" "$SHIM_LOG"'
 
-  setup "$variant-testnodemissing" "$D"; export UP_PATH="$S/up"
-  upstream_bump "$D" 1.5.3 0
-  run PKG_DIR="$PKG_DIR_ENV" TEST_NODE_VERSIONS="99" NPX_FAIL=99 TEST_CMD=true
-  check "TEST_NODE_VERSIONS: a node that cannot be fetched fails, publishes nothing" '[ $RC -ne 0 ] && ! grep -q "npm publish" "$SHIM_LOG"'
+  for bad in "99:a major with no release" "25:a node that reports another version" "23:a tarball that fails its checksum"; do
+    setup "$variant-testnodebad-${bad%%:*}" "$D"; export UP_PATH="$S/up"
+    upstream_bump "$D" 1.5.3 0
+    run PKG_DIR="$PKG_DIR_ENV" "${NODE_ENV_[@]}" TEST_NODE_VERSIONS="${bad%%:*}" TEST_CMD=true
+    check "TEST_NODE_VERSIONS: ${bad#*:} fails, publishes nothing" '[ $RC -ne 0 ] && ! grep -q "npm publish" "$SHIM_LOG"'
+  done
 
   setup "$variant-testnodebadindex" "$D"; export UP_PATH="$S/up"
   upstream_bump "$D" 1.5.4 0
-  run PKG_DIR="$PKG_DIR_ENV" NODE_DIST_INDEX="file:///nonexistent" TEST_NODE_VERSIONS="current" TEST_CMD=true
-  check "TEST_NODE_VERSIONS: current that cannot be resolved fails, publishes nothing" '[ $RC -ne 0 ] && ! grep -q "npm publish" "$SHIM_LOG"'
+  run PKG_DIR="$PKG_DIR_ENV" NODE_DIST_BASE="file:///nonexistent" TEST_NODE_VERSIONS="current" TEST_CMD=true
+  check "TEST_NODE_VERSIONS: an unreachable release index fails, publishes nothing" '[ $RC -ne 0 ] && ! grep -q "npm publish" "$SHIM_LOG"'
 
   setup "$variant-testfail" "$D"; export UP_PATH="$S/up"
   upstream_bump "$D" 1.6.0 0
