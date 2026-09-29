@@ -1,0 +1,4 @@
+# A docker-compose file is not a Dockerfile and must be ignored entirely.
+services:
+  web:
+    image: python:3.11
