@@ -46,7 +46,7 @@ on:
 
 jobs:
   bump:
-    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.6.0
+    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.7.0
     with:
       package: ${{ github.event_name == 'workflow_dispatch' && inputs.package || github.event.client_payload.package }}
       version: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.client_payload.version }}
@@ -182,11 +182,11 @@ Pin the reusable workflow (and, if you use it directly, this action) to an exact
 release tag — never a branch or `@main`:
 
 ```yaml
-- uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.6.0
+- uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.7.0
 ```
 
 ```yaml
-- uses: schuettc/tools-actions/bump@v0.6.0
+- uses: schuettc/tools-actions/bump@v0.7.0
 ```
 
 Use an **exact runner label** (`ubuntu-26.04`), never a floating `*-latest`

@@ -28,12 +28,13 @@ one of:
 A reference that uses a default / alternate / error parameter-expansion operator
 — ``${NAME:-x}``, ``${NAME:=x}``, ``${NAME:?x}``, ``${NAME:+x}`` and the
 colon-less ``-``/``=``/``?``/``+`` forms — is *inherently* safe under ``set -u``
-(it cannot raise "unbound variable"), so it is NOT required to be defined. If a
-name is guarded that way ANYWHERE in a script (the common
-``if [ -z "${X:-}" ]; then ... exit 1; fi`` prelude), later BARE uses of the
-same name in that script are treated as safe too: the author has explicitly
-acknowledged and handled its possible absence. The class of bug this guards
-against — a bare, never-guarded, never-defined variable — is still caught.
+(it cannot raise "unbound variable"), so that occurrence is NOT required to be
+defined. This is per-occurrence only: ``${X:-}`` does not define ``X``, so a
+later BARE ``$X`` in the same script is still required to be defined — the
+guarding form protects only the spot it is written. The two assigning forms
+``${X:=v}`` and ``${X=v}`` are the exception: they actually set ``X``, so later
+bare uses in the same script are satisfied. The class of bug this guards against
+— a bare, never-guarded, never-defined variable — is still caught.
 
 The parser is importable so other actions (e.g. ``images``) can adopt the same
 guard.
@@ -69,11 +70,6 @@ _ALLOWED_NAMES = frozenset(
         "TZ",
         "HOSTNAME",
         "SHLVL",
-        # gh / git honour these; they are provided by the environment, not set here.
-        "GH_TOKEN",
-        "GH_HOST",
-        # Docker / buildx defaults the runner exports.
-        "DOCKER_BUILDKIT",
     }
 )
 
@@ -86,6 +82,10 @@ def _is_default_env(name: str) -> bool:
 # ``${NAME:-x}``, ``${NAME-x}``, ``${NAME:=x}``, ``${NAME:?}``, ``${NAME:+x}`` …
 # — cannot raise "unbound variable" under ``set -u``.
 _GUARD_OPERATORS = (":-", ":=", ":?", ":+", "-", "=", "?", "+")
+# The two operators that ASSIGN the variable as a side effect (``${X:=v}`` and
+# the colon-less ``${X=v}``): unlike ``:-``/``:?``/``:+``, these actually define
+# ``X``, so a later bare ``$X`` in the same script is satisfied.
+_ASSIGN_EXPANSION_OPERATORS = (":=", "=")
 
 # ``$NAME`` (no braces): always a bare reference.
 _BARE_SIMPLE = re.compile(r"\$([A-Z_][A-Z0-9_]*)")
@@ -103,8 +103,19 @@ _ASSIGN = re.compile(
 )
 _FOR_LOOP = re.compile(r"\bfor\s+([A-Z_][A-Z0-9_]*)\s+in\b")
 _READ = re.compile(r"\bread\b((?:\s+-\w+)*)((?:\s+[A-Za-z_][A-Za-z0-9_]*)+)")
-# A name written to ``$GITHUB_ENV`` via ``echo "NAME=..."`` or ``print("NAME=...``.
-_ENV_WRITE = re.compile(r"""(?:echo\s+|print\(f?)["']?([A-Z_][A-Z0-9_]*)=""")
+# A ``NAME=`` assignment as it appears in an env-write output: an ``echo``, a
+# Python ``print`` of an f/plain string, or a bare heredoc body line. These only
+# count as ``$GITHUB_ENV`` writes when the producing output is redirected there
+# (see ``_env_writes``); being in the same script is not enough.
+_ENV_ECHO = re.compile(r"""echo\s+["']?([A-Z_][A-Z0-9_]*)=""")
+_ENV_PRINT = re.compile(r"""print\(f?["']([A-Z_][A-Z0-9_]*)=""")
+_ENV_PLAIN = re.compile(r"""^\s*([A-Z_][A-Z0-9_]*)=""")
+# A redirect whose target is exactly ``$GITHUB_ENV`` (``>`` or ``>>``); the
+# negative lookahead keeps ``$GITHUB_STEP_SUMMARY`` / ``$GITHUB_ENVIRONMENT``
+# from matching.
+_ENV_REDIR = re.compile(r">>?\s*\"?\$\{?GITHUB_ENV\}?(?!\w)")
+# A heredoc opener: ``<<WORD`` / ``<<-WORD`` / ``<<'WORD'`` / ``<<"WORD"``.
+_HEREDOC_START = re.compile(r"<<-?\s*[\"']?(?P<delim>[A-Za-z_][A-Za-z0-9_]*)[\"']?")
 # Strip GitHub Actions ``${{ ... }}`` expressions before scanning a run body so
 # they are never mistaken for shell ``${...}`` expansions.
 _GHA_EXPR = re.compile(r"\$\{\{.*?\}\}", re.DOTALL)
@@ -115,23 +126,18 @@ def _strip_gha_expressions(script: str) -> str:
 
 
 def _local_definitions(script: str) -> set[str]:
-    """Names a script defines for itself: assignments, ``for`` and ``read`` vars."""
+    """Names a script defines for itself: assignments, ``for`` and ``read`` vars,
+    and the assigning parameter-expansions ``${X:=v}`` / ``${X=v}``."""
     names: set[str] = set(_ASSIGN.findall(script))
     names.update(_FOR_LOOP.findall(script))
     for _flags, targets in _READ.findall(script):
         for tok in targets.split():
             if re.fullmatch(r"[A-Z_][A-Z0-9_]*", tok):
                 names.add(tok)
-    return names
-
-
-def _guarded_names(script: str) -> set[str]:
-    """Names referenced with a default/alternate/test operator (immune to set -u)."""
-    guarded: set[str] = set()
     for name, rest in _BRACED.findall(script):
-        if rest.startswith(_GUARD_OPERATORS):
-            guarded.add(name)
-    return guarded
+        if rest.startswith(_ASSIGN_EXPANSION_OPERATORS):
+            names.add(name)
+    return names
 
 
 def _bare_references(script: str) -> set[str]:
@@ -143,11 +149,66 @@ def _bare_references(script: str) -> set[str]:
     return refs
 
 
+def _env_write_names(text: str) -> set[str]:
+    """``NAME=`` assignments carried by a single output line/body line."""
+    names: set[str] = set(_ENV_ECHO.findall(text))
+    names.update(_ENV_PRINT.findall(text))
+    m = _ENV_PLAIN.match(text)
+    if m:
+        names.add(m.group(1))
+    return names
+
+
 def _env_writes(script: str) -> set[str]:
-    """Names this script writes to ``$GITHUB_ENV`` (available to LATER steps)."""
+    """Names this script writes to ``$GITHUB_ENV`` (available to LATER steps).
+
+    A ``NAME=`` only counts when the output that carries it is redirected to
+    ``$GITHUB_ENV``: a one-line ``echo "NAME=..." >> "$GITHUB_ENV"``, a heredoc
+    or a ``{ ... }`` group whose redirect targets ``$GITHUB_ENV``. A ``NAME=``
+    that lands on ``$GITHUB_STEP_SUMMARY`` (or anywhere else) does not count,
+    even if the same script also writes ``$GITHUB_ENV`` elsewhere.
+    """
     if "GITHUB_ENV" not in script:
         return set()
-    return set(_ENV_WRITE.findall(script))
+    names: set[str] = set()
+    lines = script.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+
+        hm = _HEREDOC_START.search(line)
+        if hm:
+            delim = hm.group("delim")
+            redir_to_env = bool(_ENV_REDIR.search(line))
+            body: list[str] = []
+            i += 1
+            while i < n and lines[i].strip() != delim:
+                body.append(lines[i])
+                i += 1
+            i += 1  # consume the delimiter line
+            if redir_to_env:
+                for b in body:
+                    names |= _env_write_names(b)
+            continue
+
+        if stripped == "{":
+            body = []
+            i += 1
+            while i < n and not lines[i].strip().startswith("}"):
+                body.append(lines[i])
+                i += 1
+            close = lines[i] if i < n else ""
+            i += 1  # consume the closing-brace line
+            if _ENV_REDIR.search(close):
+                for b in body:
+                    names |= _env_write_names(b)
+            continue
+
+        if _ENV_REDIR.search(line):
+            names |= _env_write_names(line)
+        i += 1
+    return names
 
 
 def _steps_with_env(path: Path) -> tuple[list[dict], dict]:
@@ -196,14 +257,15 @@ def undefined_run_vars(path: Path) -> list[tuple[str, str]]:
         script = _strip_gha_expressions(raw)
         step_env = set(base_env) | set(step.get("env") or {})
         local = _local_definitions(script)
-        guarded = _guarded_names(script)
 
+        # A guarding expansion (the ``${X:-}`` form) is safe only at its own occurrence:
+        # ``_bare_references`` already excludes those spots, so a name reaching
+        # this loop is a genuine bare read that must be defined some other way.
         for name in sorted(_bare_references(script)):
             if (
                 name in step_env
                 or name in env_from_earlier
                 or name in local
-                or name in guarded
                 or _is_default_env(name)
             ):
                 continue

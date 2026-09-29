@@ -98,7 +98,7 @@ jobs:
     steps:
       - name: Bump pin, relock, open PR, auto-merge, await
         id: bump
-        uses: schuettc/tools-actions/bump@v0.6.0
+        uses: schuettc/tools-actions/bump@v0.7.0
         with:
           package: ${{ inputs.package }}
           version: ${{ inputs.version }}
@@ -138,7 +138,10 @@ jobs:
             REASON="${BUMP_REASON:-${AWAIT_OUTCOME:-}}"
           fi
           [ -z "$REASON" ] && REASON="workflow failed (no step outcome captured)"
-          if [ -z "${BUMP_SCRIPTS:-}" ]; then
+          # Default-then-assign so the bare use below is a defined local, not a
+          # cross-step $GITHUB_ENV read the static guard cannot see.
+          BUMP_SCRIPTS="${BUMP_SCRIPTS:-}"
+          if [ -z "$BUMP_SCRIPTS" ]; then
             echo "::error::the bump action did not initialize (BUMP_SCRIPTS unset) — cannot open a stall issue: ${PKG} ${VER} — ${REASON}"
             exit 1
           fi

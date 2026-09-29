@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: schuettc/tools-actions/go-ci@v0.6.0
+      - uses: schuettc/tools-actions/go-ci@v0.7.0
 ```
 
 ## The same gate locally
