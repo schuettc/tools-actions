@@ -17,7 +17,12 @@ So there is now ONE matcher, config-driven: ``pins.toml`` (``--config``, default
 ``ci/bump/pins.toml``) owns which file(s) each package is pinned in, and this
 code owns only the pin SHAPES (a ``>=A,<B`` range whose ceiling is preserved, an
 exact ``==A`` pin whose ceiling is derived, and a bare ``>=A`` floor whose shape
-is preserved). A package pinned in more than one file has EVERY file rewritten.
+is preserved). A package pinned in more than one file has EVERY file rewritten,
+and EVERY occurrence within each file is rewritten — a consumer (mlb-dk) that
+declares the same pin twice in one ``pyproject.toml`` (once in
+``[project.dependencies]``, once in a ``[dependency-groups]`` group) must bump
+both, each occurrence keeping its own shape. An occurrence whose shape is not one
+of the three supported forms fails the whole rewrite loudly, naming the line.
 
 Usage (from the workflow):
 
@@ -57,10 +62,12 @@ _EXACT = r'"{pkg}==[0-9][^"]*"'
 #: last, because `_RANGE`'s prefix also matches the start of a ranged pin.
 _FLOOR_ONLY = r'"{pkg}>=[0-9][^,"<]*"'
 
-#: Any pin for the package at all — used ONLY to build a useful error when no
-#: shape matched. "could not find the pin" is true and useless; naming what WAS
-#: found is the difference between a one-line fix and a log-archaeology session.
-_ANY = r'"{pkg}[^"]*"'
+#: Any pin-shaped quoted string for the package — the enumerator of occurrences.
+#: EVERY match must resolve to one of the three shapes above; one that does not
+#: fails the rewrite (naming what was found), rather than being silently skipped.
+#: The negative lookahead is a name boundary: a bump of ``lib-a`` must not enrol
+#: ``"lib-a-engine>=..."`` as an unrecognized occurrence and reject the release.
+_ANY = r'"{pkg}(?![A-Za-z0-9._-])[^"]*"'
 
 #: The default config path when none is passed.
 _DEFAULT_CONFIG = Path("ci/bump/pins.toml")
@@ -196,51 +203,115 @@ def _derive_ceiling(version: str) -> str:
     return f"<{int(major) + 1}.0.0"
 
 
-def rewrite_pin(text: str, package: str, version: str) -> tuple[str, str]:
-    """Rewrite ``package``'s pin in ``text`` to a floor of ``version``.
+def _classify_occurrence(pin: str, package: str, version: str) -> tuple[str, str] | None:
+    """Rewrite ONE matched pin string, classified by its own shape.
 
-    Returns ``(new_text, human_description)``. The description is what the
-    workflow echoes, so a reader of the run log can tell a ceiling that was
-    PRESERVED from one that was DERIVED without opening the diff.
-
-    Raises:
-        PinNotFoundError: no `>=A,<B`, no `==A`, and no bare `>=A` pin for the
-            package. The message names every pin-shaped string that mentions the
-            package, so the failure is actionable from the log alone.
+    ``pin`` is a complete ``"pkg..."`` occurrence (an ``_ANY`` match). Returns
+    ``(new_pin_string, description)`` for a range/exact/floor shape, or ``None``
+    if it is none of the three — the caller turns that into a loud, line-named
+    failure. Each shape is derived EXACTLY as the single-occurrence logic derived
+    it before: the range ceiling is preserved verbatim, the exact ceiling is
+    derived from the version's major, the floor keeps having no ceiling.
     """
     pkg = re.escape(package)
 
-    # Search-then-splice rather than `subn` with a lambda: the ceiling has to be
-    # READ to report it, so finding the match first means the replacement and the
-    # description are built from one object instead of the text being scanned
-    # twice and the two answers trusted to agree.
-    ranged = re.search(_RANGE.format(pkg=pkg), text)
+    # Anchored against the full occurrence (`fullmatch`) so each pin is classified
+    # once, by its own text — the floor-only shape can never match inside a range
+    # because it is tested against the whole `"pkg..."` string, not a prefix.
+    ranged = re.fullmatch(_RANGE.format(pkg=pkg), pin)
     if ranged is not None:
         ceiling = ranged.group(1)
-        new = f'{text[: ranged.start()]}"{package}>={version},{ceiling}"{text[ranged.end() :]}'
-        return new, f"{package}>={version},{ceiling} (ceiling preserved)"
+        return (
+            f'"{package}>={version},{ceiling}"',
+            f"{package}>={version},{ceiling} (ceiling preserved)",
+        )
 
-    exact = re.search(_EXACT.format(pkg=pkg), text)
+    exact = re.fullmatch(_EXACT.format(pkg=pkg), pin)
     if exact is not None:
         derived = _derive_ceiling(version)
-        new = f'{text[: exact.start()]}"{package}>={version},{derived}"{text[exact.end() :]}'
         return (
-            new,
+            f'"{package}>={version},{derived}"',
             f"{package}>={version},{derived} "
             f"(was an exact == pin; ceiling DERIVED from the version's major)",
         )
 
-    floor_only = re.search(_FLOOR_ONLY.format(pkg=pkg), text)
+    floor_only = re.fullmatch(_FLOOR_ONLY.format(pkg=pkg), pin)
     if floor_only is not None:
-        new = f'{text[: floor_only.start()]}"{package}>={version}"{text[floor_only.end() :]}'
-        return new, f"{package}>={version} (floor-only pin; no ceiling, shape preserved)"
+        return (
+            f'"{package}>={version}"',
+            f"{package}>={version} (floor-only pin; no ceiling, shape preserved)",
+        )
 
-    found: list[str] = re.findall(_ANY.format(pkg=pkg), text)
-    raise PinNotFoundError(
-        f"no rewritable {package} pin found. Expected a `>=A,<B` range, a bare "
-        f"`>=A` floor, or an exact `==A` pin. "
-        + (f"Found instead: {', '.join(found)}" if found else f"No {package} pin at all.")
-    )
+    return None
+
+
+def rewrite_pin(text: str, package: str, version: str) -> tuple[str, str]:
+    """Rewrite EVERY occurrence of ``package``'s pin in ``text`` to a floor of
+    ``version``.
+
+    Returns ``(new_text, human_description)``. The description names how many
+    occurrences were rewritten and, per occurrence, whether the ceiling was
+    PRESERVED, DERIVED or absent — so a reader of the run log can tell each
+    apart without opening the diff.
+
+    Every ``_ANY`` occurrence is enumerated and classified once, by position
+    (`re.finditer` yields non-overlapping matches, so occurrences never overlap
+    or get double-processed). This is a text-level rewrite, not a TOML parse: an
+    occurrence inside a comment is rewritten like any other — matching the old
+    consumer's `re.subn`-over-the-whole-file behaviour, which is why a consumer
+    that pins the package twice bumps both.
+
+    Raises:
+        PinNotFoundError: no occurrence at all, OR some occurrence matched none of
+            `>=A,<B`, `==A`, `>=A`. Every ``_ANY`` occurrence must be rewritable;
+            an unrecognized one fails the whole rewrite (naming it and its line)
+            rather than being silently left stale.
+    """
+    pkg = re.escape(package)
+
+    matches = list(re.finditer(_ANY.format(pkg=pkg), text))
+    if not matches:
+        raise PinNotFoundError(
+            f"no rewritable {package} pin found. Expected a `>=A,<B` range, a bare "
+            f"`>=A` floor, or an exact `==A` pin. No {package} pin at all."
+        )
+
+    classified: list[tuple[re.Match[str], str]] = []
+    unsupported: list[str] = []
+    for match in matches:
+        outcome = _classify_occurrence(match.group(0), package, version)
+        if outcome is None:
+            line = text.count("\n", 0, match.start()) + 1
+            unsupported.append(f"{match.group(0)} (line {line})")
+        else:
+            classified.append((match, outcome[1]))
+
+    if unsupported:
+        raise PinNotFoundError(
+            f"no rewritable {package} pin found. Expected a `>=A,<B` range, a bare "
+            f"`>=A` floor, or an exact `==A` pin. "
+            f"Found instead: {', '.join(unsupported)}"
+        )
+
+    # Rebuild the text splicing each occurrence's own new pin in position order.
+    parts: list[str] = []
+    cursor = 0
+    descriptions: list[str] = []
+    for match in matches:
+        outcome = _classify_occurrence(match.group(0), package, version)
+        assert outcome is not None  # every occurrence proven supported above
+        new_pin, description = outcome
+        parts.append(text[cursor : match.start()])
+        parts.append(new_pin)
+        cursor = match.end()
+        descriptions.append(description)
+    parts.append(text[cursor:])
+    new_text = "".join(parts)
+
+    count = len(descriptions)
+    noun = "occurrence" if count == 1 else "occurrences"
+    summary = f"{count} {noun} rewritten: " + "; ".join(descriptions)
+    return new_text, summary
 
 
 def _resolve_file(relative: str, package: str, root: Path) -> Path:
