@@ -15,5 +15,5 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with: { fetch-depth: 0 }
-      - uses: schuettc/tools-actions/version-guard@v0.10.1
+      - uses: schuettc/tools-actions/version-guard@v0.10.2
 ```

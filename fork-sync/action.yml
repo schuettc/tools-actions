@@ -24,6 +24,10 @@ inputs:
   test_cmd:
     description: "Gate run at the repo root after the rebase, before anything is published. Must install its own deps."
     required: true
+  test_node_versions:
+    description: "Extra Node versions test_cmd also runs on before publishing, space-separated: majors (\"24\") or \"current\" / \"lts\" (nodejs.org). Empty: the job's Node only."
+    required: false
+    default: ""
   build_cmd:
     description: "Build run at the repo root before packing, when the package ships built output. Empty for none."
     required: false
@@ -96,6 +100,7 @@ runs:
         PKG_DIR: ${{ inputs.pkg_dir }}
         TAG_PREFIX: ${{ inputs.tag_prefix }}
         TEST_CMD: ${{ inputs.test_cmd }}
+        TEST_NODE_VERSIONS: ${{ inputs.test_node_versions }}
         # Straight through: an empty build_cmd must reach the script as "".
         BUILD_CMD: ${{ inputs.build_cmd }}
         GH_TOKEN: ${{ inputs.token }}
