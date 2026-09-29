@@ -62,12 +62,12 @@ runs:
           echo "::error::stale-days must be a positive integer, got '$STALE_DAYS'."
           exit 1
         fi
-        if [ -z "$LABEL" ]; then
-          echo "::error::label must not be empty."
+        if [ -z "$(printf '%s' "$LABEL" | tr -d '[:space:]')" ]; then
+          echo "::error::label must not be empty or whitespace-only."
           exit 1
         fi
-        if [ -z "$ISSUE_TITLE" ]; then
-          echo "::error::issue-title must not be empty."
+        if [ -z "$(printf '%s' "$ISSUE_TITLE" | tr -d '[:space:]')" ]; then
+          echo "::error::issue-title must not be empty or whitespace-only."
           exit 1
         fi
 
@@ -105,7 +105,8 @@ runs:
           echo "::error::gh label list failed for $REPO"
           exit 1
         fi
-        if ! printf '%s\n' "$names" | grep -qx "$LABEL"; then
+        # -F: the label is user input, so match it literally, never as a regex.
+        if ! printf '%s\n' "$names" | grep -Fqx -- "$LABEL"; then
           if ! gh label create "$LABEL" --repo "$REPO" --color "d93f0b" \
                 --description "Dependabot PR left open past the stale threshold"; then
             echo "::error::failed to create label $LABEL"

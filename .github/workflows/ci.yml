@@ -222,6 +222,24 @@ jobs:
         shell: bash
         run: bash version-guard/tests/test.sh
 
+  testlib:
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12.14", "3.14.7"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "${{ matrix.python-version }}"
+      - name: Install test deps
+        shell: bash
+        run: python -m pip install --disable-pip-version-check pytest==9.1.1 pyyaml==6.0.3
+      - name: testlib self-tests (the shared step-variable guard)
+        shell: bash
+        run: python -m pytest testlib/tests -q
+
   dependabot-automerge:
     runs-on: ubuntu-26.04
     strategy:

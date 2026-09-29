@@ -21,6 +21,7 @@ installs the same pinned tools so this always runs).
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -46,10 +47,10 @@ REQUIRED_PERMISSIONS = {
     "issues": "write",
 }
 
-# The reusable step-variable guard lives beside this test (copied verbatim from
-# bump/tests/stepvars.py; bump/ is not modified).
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from stepvars import undefined_run_vars  # noqa: E402
+# The step-variable guard is shared test tooling (testlib/, not an action); its
+# own tests live in testlib/tests. Adopt the ONE shared copy.
+sys.path.insert(0, str(REPO_ROOT))
+from testlib.stepvars import undefined_run_vars  # noqa: E402
 
 
 def _load(path: Path) -> dict:
@@ -146,7 +147,10 @@ def test_loud_on_gh_errors():
     # gh's exit status straight into grep.
     assert "gh label list failed" in run
     assert 'names="$(gh label list' in run
-    assert 'grep -qx "$LABEL"' in run
+    # M-a: the label is user input, so it must be matched literally (-F), not as
+    # a regex; -qx keeps the full-line, quiet behaviour.
+    assert 'grep -Fqx -- "$LABEL"' in run
+    assert 'grep -qx "$LABEL"' not in run
 
 
 def test_rejects_empty_or_invalid_inputs_loudly():
@@ -278,3 +282,57 @@ def test_readme_pins_this_repo_at_release_tag():
     assert pins, "README must show at least one pinned caller example"
     for pin in pins:
         assert pin == f"v{version}", f"README pin {pin} != v{version}"
+
+
+# --- M-b: whitespace-only inputs are rejected (guard executed for real) ------
+
+
+def _guard_step() -> dict:
+    for step in _load(ACTION_YML)["runs"]["steps"]:
+        if step.get("id") == "guard":
+            return step
+    raise AssertionError("no guard step")
+
+
+def _exec_guard(env: dict) -> subprocess.CompletedProcess:
+    full = {"PATH": os.environ.get("PATH", ""), **env}
+    return subprocess.run(
+        ["bash", "-c", _guard_step()["run"]],
+        env=full,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _guard_env(**over):
+    base = {
+        "GH_TOKEN": "tok",
+        "STALE_DAYS": "14",
+        "LABEL": "dependency-stale",
+        "ISSUE_TITLE": "Stale Dependabot PRs",
+    }
+    base.update(over)
+    return base
+
+
+def test_guard_accepts_valid_inputs():
+    proc = _exec_guard(_guard_env())
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_guard_rejects_whitespace_only_label():
+    proc = _exec_guard(_guard_env(LABEL="   "))
+    assert proc.returncode == 1
+    assert "label must not be empty" in proc.stdout
+
+
+def test_guard_rejects_whitespace_only_issue_title():
+    proc = _exec_guard(_guard_env(ISSUE_TITLE="  \t "))
+    assert proc.returncode == 1
+    assert "issue-title must not be empty" in proc.stdout
+
+
+def test_guard_rejects_non_positive_stale_days():
+    proc = _exec_guard(_guard_env(STALE_DAYS="-3"))
+    assert proc.returncode == 1
+    assert "stale-days must be a positive integer" in proc.stdout

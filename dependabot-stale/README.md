@@ -50,6 +50,8 @@ least-privilege `permissions:` block. Pin both actions to an exact release tag:
 name: Dependabot
 on:
   pull_request:
+    # Only PRs targeting the integration branch.
+    branches: ["dev"]
   schedule:
     # Weekly sweep for held majors that have gone stale.
     - cron: "17 6 * * 1"
@@ -67,6 +69,7 @@ jobs:
       - uses: schuettc/tools-actions/dependabot-automerge@v0.8.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          target-branch: dev
   stale:
     name: Track stale Dependabot PRs
     if: ${{ github.event_name == 'schedule' }}
@@ -88,8 +91,9 @@ alias.
 ## Security model
 
 - **Least privilege.** The sweep needs `pull-requests: read` (list open PRs) and
-  `issues: write` (manage the one tracking issue); `contents: read` is ambient.
-  The top-level workflow declares `permissions: {}` so nothing else is granted.
+  `issues: write` (manage the one tracking issue), plus `contents: read`. Under
+  the top-level `permissions: {}` NOTHING is ambient, so the job must grant all
+  three explicitly (the caller example does); no other scope is available.
 - **No PR code.** It never checks out or runs PR-controlled code; it only reads
   metadata and edits an issue.
 - **Loud on failure.** Every `gh` call is guarded; the step aborts on error

@@ -5,8 +5,9 @@ description: >-
   at an exact pin, evaluates the ONE policy decision (automerge_policy.py, beside
   this action, run via $GITHUB_ACTION_PATH), and — only for allowed updates —
   runs `gh pr merge --auto`. It NEVER checks out or executes PR-controlled code,
-  and refuses to act on any PR that is not Dependabot's own. Every policy value
-  is an input; nothing about a calling project is baked in.
+  and refuses to act on any PR that is not Dependabot's own, not targeting the
+  permitted branch, or from a disallowed ecosystem. Every policy value is an
+  input; nothing about a calling project is baked in.
 
 # Security model (see README): this action is meant to run from a caller's
 # `pull_request` workflow (NOT `pull_request_target`), gated by
@@ -20,6 +21,12 @@ inputs:
       GITHUB_TOKEN elevated by the caller's `permissions:` (contents: write,
       pull-requests: write). Used by fetch-metadata and `gh pr merge`.
     required: true
+  target-branch:
+    description: >-
+      The one branch Dependabot PRs may auto-merge into (the integration branch,
+      e.g. dev). A PR whose base is not this branch is skipped. Required and must
+      not be empty — this restores the source's target-branch guard.
+    required: true
   merge-method:
     description: "How auto-merge lands the PR: squash | merge | rebase."
     required: false
@@ -28,9 +35,17 @@ inputs:
     description: >-
       Space/comma-separated fetch-metadata update-types that may auto-merge.
       Default is patch + minor; add version-update:semver-major to auto-merge
-      majors (they wait for review by default).
+      majors (they wait for review by default). Must be non-empty and every token
+      must be one of version-update:semver-{patch,minor,major}.
     required: false
     default: "version-update:semver-patch version-update:semver-minor"
+  allowed-ecosystems:
+    description: >-
+      Space/comma-separated package-ecosystems whose PRs may auto-merge. Defaults
+      to the ecosystems the source allowed (docker, github-actions, uv, pip, npm);
+      a PR from any other ecosystem is skipped. Must not be empty.
+    required: false
+    default: "docker github-actions uv pip npm"
   allow-docker-digest:
     description: >-
       Auto-merge docker digest bumps (package-ecosystem docker with an empty
@@ -41,74 +56,96 @@ inputs:
 runs:
   using: composite
   steps:
-    # Defense in depth: only Dependabot's own pull_request events proceed. A
-    # non-PR event or a non-Dependabot actor is skipped (not failed) so an
-    # ungated caller degrades safely instead of merging the wrong PR.
-    - name: Guard - only Dependabot's own pull_request
+    # Defense in depth + input validation up front. A misconfiguration (empty
+    # token, bad merge-method, empty target-branch) fails loudly here; a non-PR
+    # event or a non-Dependabot actor is skipped (not failed) so an ungated
+    # caller degrades safely instead of merging the wrong PR. The skip decision
+    # is a STEP OUTPUT (not $GITHUB_ENV) so it never leaks into the caller job's
+    # later steps.
+    - name: Guard - validate inputs and that this is Dependabot's own pull_request
       id: guard
       shell: bash
       env:
         ACTOR: ${{ github.actor }}
         EVENT_NAME: ${{ github.event_name }}
         GH_TOKEN: ${{ inputs.github-token }}
+        MERGE_METHOD: ${{ inputs.merge-method }}
+        TARGET_BRANCH: ${{ inputs.target-branch }}
       run: |
         set -euo pipefail
-        # A required input that is empty is a misconfiguration, not a skip: the
+        # Required inputs that are empty are misconfigurations, not skips: the
         # runner does not enforce composite `required:`, so fail loudly here.
         if [ -z "$GH_TOKEN" ]; then
           echo "::error::github-token is required and must not be empty (pass secrets.GITHUB_TOKEN)."
           exit 1
         fi
+        # Validate merge-method NOW, not at merge time, so a typo fails on the
+        # first run rather than staying green until the first mergeable PR.
+        case "$MERGE_METHOD" in
+          squash|merge|rebase) ;;
+          *) echo "::error::merge-method must be squash|merge|rebase, got '$MERGE_METHOD'"; exit 1 ;;
+        esac
+        if [ -z "$(printf '%s' "$TARGET_BRANCH" | tr -d '[:space:]')" ]; then
+          echo "::error::target-branch is required and must not be empty or whitespace (the branch Dependabot PRs may auto-merge into)."
+          exit 1
+        fi
         if [ "$EVENT_NAME" != "pull_request" ]; then
-          echo "Event is '$EVENT_NAME', not 'pull_request' — refusing to auto-merge (use a pull_request-triggered caller, never pull_request_target)."
-          echo "SKIP=true" >> "$GITHUB_ENV"
+          echo "Event is '$EVENT_NAME', not 'pull_request' — skipping (use a pull_request-triggered caller, never pull_request_target)."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
           exit 0
         fi
         if [ "$ACTOR" != "dependabot[bot]" ]; then
-          echo "Actor '$ACTOR' is not dependabot[bot] — refusing to auto-merge."
-          echo "SKIP=true" >> "$GITHUB_ENV"
+          echo "Actor '$ACTOR' is not dependabot[bot] — skipping."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        echo "SKIP=false" >> "$GITHUB_ENV"
+        echo "skip=false" >> "$GITHUB_OUTPUT"
 
     - name: Fetch Dependabot metadata
       id: meta
-      if: ${{ env.SKIP != 'true' }}
+      if: ${{ steps.guard.outputs.skip != 'true' }}
       uses: dependabot/fetch-metadata@v2.5.0
       with:
         github-token: ${{ inputs.github-token }}
 
     # The ONE policy decision. Exit 0 = merge, 10 = skip, anything else = misuse
     # (fail loudly). Everything reaches the script through env; no ${{ }} in run.
+    # The merge decision is a STEP OUTPUT so the merge step's `if:` gates on it
+    # directly and nothing leaks into the caller job.
     - name: Evaluate auto-merge policy
       id: policy
-      if: ${{ env.SKIP != 'true' }}
+      if: ${{ steps.guard.outputs.skip != 'true' }}
       shell: bash
       env:
         ACTOR: ${{ github.actor }}
         UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
         PACKAGE_ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        TARGET_BRANCH: ${{ inputs.target-branch }}
         ALLOWED_UPDATE_TYPES: ${{ inputs.allowed-update-types }}
+        ALLOWED_ECOSYSTEMS: ${{ inputs.allowed-ecosystems }}
         ALLOW_DOCKER_DIGEST: ${{ inputs.allow-docker-digest }}
       run: |
         set -euo pipefail
         DECISION=0
         python3 "$GITHUB_ACTION_PATH/automerge_policy.py" || DECISION=$?
         if [ "$DECISION" -eq 0 ]; then
-          echo "MERGE=true" >> "$GITHUB_ENV"
+          echo "merge=true" >> "$GITHUB_OUTPUT"
         elif [ "$DECISION" -eq 10 ]; then
-          echo "MERGE=false" >> "$GITHUB_ENV"
+          echo "merge=false" >> "$GITHUB_OUTPUT"
         else
           echo "::error::auto-merge policy evaluation failed (exit $DECISION)"
           exit "$DECISION"
         fi
 
-    # Arm GitHub-native auto-merge — never a direct merge. The PR URL is read
-    # from the event payload ($GITHUB_EVENT_PATH), so no PR fact is passed in and
-    # no PR code is checked out.
+    # Arm GitHub-native auto-merge — never a direct merge. Gated EXACTLY on the
+    # policy decision (steps.policy.outputs.merge == 'true'); dropping that
+    # condition would arm every Dependabot PR, majors included. The PR URL is
+    # read from the event payload ($GITHUB_EVENT_PATH), so no PR fact is passed
+    # in and no PR code is checked out.
     - name: Arm native auto-merge
       id: merge
-      if: ${{ env.SKIP != 'true' && env.MERGE == 'true' }}
+      if: ${{ steps.guard.outputs.skip != 'true' && steps.policy.outputs.merge == 'true' }}
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -120,6 +157,7 @@ runs:
           echo "::error::could not read .pull_request.html_url from the event payload"
           exit 1
         fi
+        FLAG=""
         case "$MERGE_METHOD" in
           squash) FLAG="--squash" ;;
           merge)  FLAG="--merge" ;;

@@ -15,15 +15,20 @@ PR is Dependabot's own before doing anything. The tested policy decision lives i
 
 ## What it does
 
-1. Guards that the event is `pull_request` and the actor is `dependabot[bot]`
-   (defense in depth — see the security model); otherwise it skips, harmlessly.
+1. Validates its inputs (empty `github-token`, a bad `merge-method`, an empty
+   `target-branch` fail loudly) and guards that the event is `pull_request` and
+   the actor is `dependabot[bot]` (defense in depth — see the security model);
+   on a non-PR event or a non-Dependabot actor it skips (exit 0), harmlessly.
 2. Runs `dependabot/fetch-metadata@v2.5.0` (an exact pin) to read the PR's
    `update-type` and `package-ecosystem`.
-3. Evaluates the policy: merge when the `update-type` is in
-   `allowed-update-types`, **or** it is an ungrouped docker **digest** bump
+3. Evaluates the policy: merge when the PR targets `target-branch`, its ecosystem
+   is in `allowed-ecosystems`, and either the `update-type` is in
+   `allowed-update-types` **or** it is an ungrouped docker **digest** bump
    (`package-ecosystem == docker` with an empty `update-type`) and
-   `allow-docker-digest` is true. Majors are absent from the default allow-list,
-   so they wait.
+   `allow-docker-digest` is true. A PR against another branch, from a disallowed
+   ecosystem, or a major (absent from the default allow-list) waits. An empty or
+   invalid `allowed-update-types` / `allowed-ecosystems` fails loudly rather than
+   silently disabling merging.
 4. For an allowed PR, runs `gh pr merge --auto` with the chosen merge method.
    Never a direct merge — auto-merge respects the required-checks gate.
 
@@ -32,8 +37,10 @@ PR is Dependabot's own before doing anything. The tested policy decision lives i
 | Input | Required | Default | Description |
 |---|---|---|---|
 | `github-token` | yes | — | `GITHUB_TOKEN`, elevated by the caller's `permissions:`. Used by fetch-metadata and `gh pr merge`. Rejected loudly if empty. |
-| `merge-method` | no | `squash` | How auto-merge lands the PR: `squash`, `merge` or `rebase`. |
-| `allowed-update-types` | no | `version-update:semver-patch version-update:semver-minor` | Space/comma-separated fetch-metadata update-types that may auto-merge. Add `version-update:semver-major` to auto-merge majors (they wait by default). |
+| `target-branch` | yes | — | The one branch Dependabot PRs may auto-merge into (the integration branch, e.g. `dev`). A PR whose base is not this branch is skipped. Rejected loudly if empty. |
+| `merge-method` | no | `squash` | How auto-merge lands the PR: `squash`, `merge` or `rebase`. Validated up front. |
+| `allowed-update-types` | no | `version-update:semver-patch version-update:semver-minor` | Space/comma-separated fetch-metadata update-types that may auto-merge. Add `version-update:semver-major` to auto-merge majors (they wait by default). Must be non-empty and every token must be `version-update:semver-{patch,minor,major}`. |
+| `allowed-ecosystems` | no | `docker github-actions uv pip npm` | Space/comma-separated package-ecosystems whose PRs may auto-merge; any other ecosystem is skipped. Must not be empty. |
 | `allow-docker-digest` | no | `true` | Auto-merge docker digest bumps (docker ecosystem with an empty update-type). `true`/`false`. |
 
 Everything is a **policy** input; no calling-project fact (repo, org, branch,
@@ -64,6 +71,9 @@ release tag:
 name: Dependabot
 on:
   pull_request:
+    # Only PRs targeting the integration branch; the action also re-checks the
+    # PR base against its target-branch input as defense in depth.
+    branches: ["dev"]
   schedule:
     # Weekly sweep for held majors that have gone stale.
     - cron: "17 6 * * 1"
@@ -81,8 +91,10 @@ jobs:
       - uses: schuettc/tools-actions/dependabot-automerge@v0.8.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          target-branch: dev
           merge-method: squash
           allowed-update-types: version-update:semver-patch version-update:semver-minor
+          allowed-ecosystems: docker github-actions uv pip npm
           allow-docker-digest: "true"
   stale:
     name: Track stale Dependabot PRs
@@ -109,17 +121,30 @@ together — see [`dependabot-stale`](../dependabot-stale/README.md).
 ## `dependabot.yml` example
 
 `dependabot.yml` is per-repo config, not part of this action — this is a
-documented example only. Group the SemVer ecosystems by `minor`/`patch` so one
-PR carries the safe bumps; leave **docker ungrouped** (one PR per image) so a
-digest bump reports single-dependency metadata with an empty `update-type` (which
-is exactly what the digest rule keys on — grouping docker would make
-fetch-metadata report the group as a semver-major and defeat digest auto-merge):
+documented example only. It must match the action's policy for auto-merge to be
+safe, so the example (and the test that guards it) keeps two things the source
+guaranteed:
+
+- **`target-branch` on every entry**, equal to the action's `target-branch` input
+  (`dev` here). Without it Dependabot targets — and this action would auto-merge
+  into — GitHub's default branch, not the integration branch.
+- **a `cooldown` on every entry** (`default-days` ≥ 0), plus `semver-major-days`
+  on the SemVer ecosystems (`uv`/`pip`/`npm`; docker and github-actions do not
+  support it), so a freshly published release is never auto-merged the instant it
+  lands — auto-merge always comes with a cooldown.
+
+Group the SemVer ecosystems by `minor`/`patch` so one PR carries the safe bumps;
+leave **docker ungrouped** (one PR per image) so a digest bump reports
+single-dependency metadata with an empty `update-type` (which is exactly what the
+digest rule keys on — grouping docker would make fetch-metadata report the group
+as a semver-major and defeat digest auto-merge):
 
 ```yaml
 version: 2
 updates:
   - package-ecosystem: "pip"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     cooldown:
@@ -134,12 +159,14 @@ updates:
   # an empty update-type. github-actions / docker do not support semver-*-days.
   - package-ecosystem: "docker"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     cooldown:
       default-days: 3
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     cooldown:
@@ -161,8 +188,9 @@ Dependabot), not Actions secrets.
   `permissions:` block elevates only what auto-merge needs. Because this action
   **never checks out or runs PR code**, `pull_request` with an elevated token is
   the safe choice; `pull_request_target` (which runs in the base-repo context
-  with secrets) is unnecessary and riskier. The action refuses to run on any
-  event other than `pull_request`.
+  with secrets) is unnecessary and riskier. On any event other than
+  `pull_request` the action does not act — it skips cleanly (exit 0) rather than
+  failing — so an accidentally broad trigger cannot auto-merge anything.
 - **Only Dependabot's own PRs.** The caller gates the job with
   `if: github.actor == 'dependabot[bot]'`, and the action re-checks the actor as
   defense in depth: an accidentally ungated caller still cannot auto-merge a
