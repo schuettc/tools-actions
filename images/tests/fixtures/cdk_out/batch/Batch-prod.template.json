@@ -1,0 +1,47 @@
+{
+  "Resources": {
+    "JobString1A": {
+      "Type": "AWS::Batch::JobDefinition",
+      "Properties": {
+        "Type": "container",
+        "ContainerProperties": {
+          "Image": "222222222222.dkr.ecr.us-east-1.amazonaws.com/cdk-hnb659fds-container-assets-222222222222-us-east-1:b1b1b1b1c2c2c2c2d3d3d3d3e4e4e4e4f5f5f5f5a6a6a6a6b7b7b7b7c8c8c8c8"
+        }
+      }
+    },
+    "JobSub2B": {
+      "Type": "AWS::Batch::JobDefinition",
+      "Properties": {
+        "Type": "container",
+        "ContainerProperties": {
+          "Image": {
+            "Fn::Sub": "222222222222.dkr.ecr.us-east-1.${AWS::URLSuffix}/cdk-hnb659fds-container-assets-222222222222-us-east-1:b1b1b1b1c2c2c2c2d3d3d3d3e4e4e4e4f5f5f5f5a6a6a6a6b7b7b7b7c8c8c8c8"
+          }
+        }
+      }
+    },
+    "JobJoin3C": {
+      "Type": "AWS::Batch::JobDefinition",
+      "Properties": {
+        "Type": "container",
+        "ContainerProperties": {
+          "Image": {
+            "Fn::Join": [
+              "",
+              [
+                {"Fn::Select": [4, {"Fn::Split": [":", {"Fn::GetAtt": ["ImageRepoD50AF4EB", "Arn"]}]}]},
+                ".dkr.ecr.",
+                {"Fn::Select": [3, {"Fn::Split": [":", {"Fn::GetAtt": ["ImageRepoD50AF4EB", "Arn"]}]}]},
+                ".",
+                {"Ref": "AWS::URLSuffix"},
+                "/",
+                {"Ref": "ImageRepoD50AF4EB"},
+                ":b1b1b1b1c2c2c2c2d3d3d3d3e4e4e4e4f5f5f5f5a6a6a6a6b7b7b7b7c8c8c8c8"
+              ]
+            ]
+          }
+        }
+      }
+    }
+  }
+}
