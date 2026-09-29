@@ -9,10 +9,13 @@
 #    into ~/.cache/tools-actions/vX.Y.Z/ (kept; later runs work offline).
 # 3. Use golangci-lint from PATH if it is the locked version, else install the
 #    locked version into the cache (checksum-verified) and use that.
-# 4. Run the gate with the same settings CI uses.
+# 4. Run Go at the version CI's actions/setup-go installs from go.mod (see
+#    below), not whatever Go is on PATH.
+# 5. Run the gate with the same settings CI uses.
 #
 # Env: TOOLS_ACTIONS_BASE (default https://raw.githubusercontent.com/schuettc/tools-actions),
 #      GOLANGCI_DL_BASE (default https://github.com/golangci/golangci-lint/releases/download),
+#      GO_DL_JSON (default https://go.dev/dl/?mode=json&include=all), GOTOOLCHAIN (kept if set),
 #      XDG_CACHE_HOME, and ci.sh's own RACE / TARGETS / PACKAGES / SKIP_LINT.
 set -euo pipefail
 die() { echo "go-ci local: $*" >&2; exit 2; }
@@ -59,5 +62,35 @@ if [ -z "${GOLANGCI_LINT_CACHE:-}" ]; then
   export GOLANGCI_LINT_CACHE="$cache/golangci-lint-cache/$key"
 fi
 
-echo "go-ci local: tools-actions $ver, golangci-lint ${want:-as installed}"
+# Go: the version CI's actions/setup-go installs from go-version-file: go.mod.
+# Its rule: the toolchain directive if present, else the go directive, used as
+# is when it names a patch and resolved to that minor's newest stable patch when
+# it does not. GOTOOLCHAIN makes the go command on PATH fetch and run exactly
+# that version (once; Go caches it). A GOTOOLCHAIN you set is kept.
+[ -f go.mod ] || die "no go.mod here: run from the module root"
+if [ -z "${GOTOOLCHAIN:-}" ]; then
+  gov="$(awk '$1=="toolchain"{sub(/^go/,"",$2); print $2; exit}' go.mod)"
+  [ -n "$gov" ] || gov="$(awk '$1=="go"{print $2; exit}' go.mod)"
+  [ -n "$gov" ] || die "go.mod has no go directive"
+  case "$gov" in
+    *.*.*) ;;
+    *)
+      # A bare minor: newest stable patch from go.dev, cached so later runs work
+      # offline (a fetch failure falls back to the cached answer).
+      rdir="$cache/go"; rfile="$rdir/$gov"
+      json="$(curl -fsSL "${GO_DL_JSON:-https://go.dev/dl/?mode=json&include=all}" 2>/dev/null || true)"
+      patch="$(printf '%s' "$json" | grep -oE "\"go${gov//./\\.}\.[0-9]+\"" | tr -d '"' | sed 's/^go//' | sort -t. -k3,3n | tail -1 || true)"
+      if [ -n "$patch" ]; then
+        mkdir -p "$rdir" && printf '%s\n' "$patch" > "$rfile"
+      elif [ -f "$rfile" ]; then
+        patch="$(cat "$rfile")"
+      else
+        die "cannot resolve go $gov to a patch release (go.dev unreachable, nothing cached)"
+      fi
+      gov="$patch" ;;
+  esac
+  export GOTOOLCHAIN="go$gov"
+fi
+
+echo "go-ci local: tools-actions $ver, golangci-lint ${want:-as installed}, $GOTOOLCHAIN"
 FAMILY_CONFIG="$dir/golangci.yml" exec bash "$dir/ci.sh"

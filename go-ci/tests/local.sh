@@ -27,6 +27,7 @@ printf 'version: "2"\n' > "$W/pub/v9.9.9/go-ci/golangci.yml"
 printf 'version 2.12.2\n' > "$W/pub/v9.9.9/go-ci/golangci-lint.lock"
 
 repo="$W/repo"; mkdir -p "$repo/.github/workflows"
+printf 'module example.com/x\n\ngo 1.26.3\n' > "$repo/go.mod"
 cat > "$repo/.github/workflows/ci.yml" <<'YML'
 jobs:
   ci:
@@ -34,7 +35,9 @@ jobs:
       - uses: schuettc/tools-actions/go-ci@v9.9.9
 YML
 mkdir -p "$W/bin"; printf '#!/bin/sh\necho "golangci-lint has version 2.12.2"\n' > "$W/bin/golangci-lint"; chmod +x "$W/bin/golangci-lint"
-run() { ( cd "$repo" && env PATH="$W/bin:$PATH" TOOLS_ACTIONS_BASE="file://$W/pub" XDG_CACHE_HOME="$W/cache" "$@" bash "$A/local.sh" ) > "$W/log" 2>&1; }
+# -u GOTOOLCHAIN: CI's setup-go exports GOTOOLCHAIN=local, which local.sh would
+# rightly keep; each case starts clean, as a developer's shell does.
+run() { ( cd "$repo" && env -u GOTOOLCHAIN PATH="$W/bin:$PATH" TOOLS_ACTIONS_BASE="file://$W/pub" XDG_CACHE_HOME="$W/cache" "$@" bash "$A/local.sh" ) > "$W/log" 2>&1; }
 
 echo "== runs the pinned version"
 run; rc=$?
@@ -92,12 +95,46 @@ printf '#!/usr/bin/env bash\necho "cache=$GOLANGCI_LINT_CACHE"\n' > "$W/pub/v9.9
 printf '#!/bin/sh\necho "golangci-lint has version 2.12.2"\n' > "$W/bin/golangci-lint"
 rm -rf "$W/cache"; printf 'version 2.12.2\n' > "$W/pub/v9.9.9/go-ci/golangci-lint.lock"
 run; c1="$(grep -o 'cache=.*' "$W/log")"
-mkdir -p "$W/repo2/.github/workflows"; cp "$repo/.github/workflows/ci.yml" "$W/repo2/.github/workflows/"
+mkdir -p "$W/repo2/.github/workflows"; cp "$repo/.github/workflows/ci.yml" "$W/repo2/.github/workflows/"; cp "$repo/go.mod" "$W/repo2/"
 ( cd "$W/repo2" && env PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" TOOLS_ACTIONS_BASE="file://$W/pub" bash "$A/local.sh" ) > "$W/log" 2>&1
 c2="$(grep -o 'cache=.*' "$W/log")"
 check "two checkouts get two lint caches, under the tools-actions cache" '[ -n "$c1" ] && [ "$c1" != "$c2" ] && case "$c1" in "cache=$W/cache/tools-actions/"*) true;; *) false;; esac'
 ( cd "$repo" && env GOLANGCI_LINT_CACHE=/mine PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" TOOLS_ACTIONS_BASE="file://$W/pub" bash "$A/local.sh" ) > "$W/log" 2>&1
 check "a GOLANGCI_LINT_CACHE you set is kept" 'grep -q "cache=/mine" "$W/log"'
+
+echo "== Go: the version CI's setup-go would use"
+# CI installs Go from go.mod (actions/setup-go go-version-file): the toolchain
+# directive if present, else the go directive, which is used as-is when it has
+# a patch and resolved to that minor's newest patch when it does not. The local
+# gate must run that Go, not whatever Go is on PATH.
+printf '#!/usr/bin/env bash\necho "gotoolchain=${GOTOOLCHAIN:-unset}"\n' > "$W/pub/v9.9.9/go-ci/ci.sh"
+rm -rf "$W/cache"
+cat > "$W/godl.json" <<'JSON'
+[{"version": "go1.27.1", "stable": true}, {"version": "go1.26.10", "stable": true},
+ {"version": "go1.26.2", "stable": true}, {"version": "go1.26rc1", "stable": false}]
+JSON
+gomod() { printf 'module example.com/x\n\n%s\n' "$1" > "$repo/go.mod"; }
+gomod 'go 1.26.3'
+run GO_DL_JSON=/nonexistent; rc=$?
+check "an exact go directive is used as is, without the network" '[ $rc -eq 0 ] && grep -q "gotoolchain=go1.26.3" "$W/log"'
+gomod $'go 1.26\ntoolchain go1.26.5'
+run GO_DL_JSON=/nonexistent; rc=$?
+check "a toolchain directive wins over the go directive" '[ $rc -eq 0 ] && grep -q "gotoolchain=go1.26.5" "$W/log"'
+gomod 'go 1.26'
+run GO_DL_JSON="file://$W/godl.json"; rc=$?
+check "a bare minor resolves to its newest patch (numeric, not lexical; no rc)" '[ $rc -eq 0 ] && grep -q "gotoolchain=go1.26.10" "$W/log"'
+run GO_DL_JSON=file:///nonexistent; rc=$?
+check "a resolved minor is cached, so later runs work offline" '[ $rc -eq 0 ] && grep -q "gotoolchain=go1.26.10" "$W/log"'
+rm -rf "$W/cache/tools-actions/go"
+run GO_DL_JSON=file:///nonexistent; rc=$?
+check "an unresolvable minor with nothing cached fails and names it" '[ $rc -ne 0 ] && grep -q "1.26" "$W/log"'
+gomod 'go 1.26.3'
+run GOTOOLCHAIN=go1.99.0; rc=$?
+check "a GOTOOLCHAIN you set is kept" '[ $rc -eq 0 ] && grep -q "gotoolchain=go1.99.0" "$W/log"'
+rm "$repo/go.mod"
+run; rc=$?
+check "no go.mod fails and says so" '[ $rc -ne 0 ] && grep -q "go.mod" "$W/log"'
+gomod 'go 1.26.3'
 
 echo; echo "passed $pass, failed $failn"
 [ "$failn" -eq 0 ]
