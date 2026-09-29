@@ -64,7 +64,7 @@ jobs:
       issues: write
       actions: read
       checks: read
-    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.9.1
+    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.9.2
     with:
       package: ${{ github.event_name == 'workflow_dispatch' && inputs.package || github.event.client_payload.package }}
       version: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.client_payload.version }}
@@ -109,7 +109,9 @@ loud error that names the offender.
 | `stall_label` | The label carried by the one stall issue per package. **Required and non-empty** when a config is supplied — a missing key, an empty string, or a non-string value fails loudly (no silent fallback to a label the workflow does not agree with). Pass the SAME value as the `stall_label` workflow input (that input is the pre-checkout fallback). |
 | `required_check` | The name of the required status check the await loop gates the merge on (e.g. `CI`). **Required and non-empty** — a consumer whose gate is not named `CI` would otherwise stall on a 20-minute "timeout" instead of reading its own red check. |
 | `stage_globs` | Paths/globs the lock and post-lock commands may change (the lock file plus any exported outputs). Pinned files are always allowed; **anything else the bump changed fails loudly**. |
+| `exact_pins` | How an exact `==A` pin is rewritten. `"range"` (the **documented default** when the key is absent, not a silent fallback) turns `==A` into a floor + derived next-major ceiling — the temporary dev-channel (`==X.Y.Z.devN`) case a release replaces. `"keep"` holds it exact — `==A` becomes `==NEW` — for a consumer that freezes its lock with `[tool.uv] constraint-dependencies`, where `==` must stay exact and advance. An empty string or unknown value fails loudly. Range and floor-only shapes are unaffected. |
 | `[[package]]` `name` + `files` | Each consumed package and the file(s) its pin lives in. A package pinned in more than one file has every file rewritten. |
+| `[[package]]` `exact_pins` | Per-package override of the global `exact_pins`. The per-package value wins. |
 
 There is **no ecosystem name in the code** — a project that relocks with uv,
 poetry, npm or anything else just lists the file(s) its command writes in
@@ -124,6 +126,10 @@ required_check = "CI"
 # listed here is a stray change and fails the bump loudly (a visible
 # misconfiguration, never a silent sweep).
 stage_globs = ["uv.lock"]
+# How an exact `==A` pin is rewritten: "range" (the default) derives a next-major
+# ceiling; "keep" holds it exact as `==NEW` (for a constraint-dependencies freeze
+# that must stay `==`). Absent = "range".
+exact_pins = "keep"
 
 [[package]]
 name = "lib-one"
@@ -132,6 +138,8 @@ files = ["packages/app/pyproject.toml"]
 [[package]]
 name = "lib-two"
 files = ["packages/app/pyproject.toml", "packages/lib/pyproject.toml"]
+# A per-package override wins over the global exact_pins above.
+exact_pins = "range"
 ```
 
 A public-index, no-relock project is simply:
@@ -156,8 +164,12 @@ The one matcher rewrites exactly three shapes and reports which it did:
   **ceiling is preserved verbatim** (it tracks the wheel's major and moves by a
   deliberate PR, not by this bump). A two-component ceiling (`<2.0`) is legal and
   is not rewritten to three components.
-- `==A` — the documented dev-channel form (`==X.Y.Z.devN`). It becomes a floor
-  and a **derived** next-major ceiling (`<{major+1}.0.0`).
+- `==A` — an exact pin. Its rewrite is set by `exact_pins`: with `"range"` (the
+  default) it becomes a floor and a **derived** next-major ceiling
+  (`<{major+1}.0.0`) — the documented dev-channel form (`==X.Y.Z.devN`) a release
+  replaces; with `"keep"` it stays exact and advances to `==NEW` — for a
+  `[tool.uv] constraint-dependencies` freeze that must remain `==`.
+  The summary names which rule applied.
 - `>=A` — a bare floor with no ceiling, deliberately. The floor moves and the
   shape is preserved; no ceiling is derived (that would silently narrow a bound
   nobody chose).
@@ -212,13 +224,13 @@ JOB level (`jobs.<id>.uses`), not as a step:
 ```yaml
 jobs:
   bump:
-    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.9.1
+    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.9.2
 ```
 
 If you use the composite action directly, it is a step-level `uses`:
 
 ```yaml
-- uses: schuettc/tools-actions/bump@v0.9.1
+- uses: schuettc/tools-actions/bump@v0.9.2
 ```
 
 Use an **exact runner label** (`ubuntu-26.04`), never a floating `*-latest`

@@ -43,7 +43,7 @@ from testlib.stepvars import undefined_run_vars  # noqa: E402
 # bump_pin.py lives beside the action; import the loaders so the README's toml
 # examples are validated against the REAL config parser (I3).
 sys.path.insert(0, str(ACTION_DIR))
-from bump_pin import load_config, load_stage_globs  # noqa: E402
+from bump_pin import load_config, load_exact_pins, load_stage_globs  # noqa: E402
 
 # Permission levels, weakest to strongest, for the C1 coverage assertion.
 _PERM_RANK = {"none": 0, "read": 1, "write": 2}
@@ -401,6 +401,7 @@ def test_readme_toml_blocks_load_through_the_real_loaders(tmp_path: Path) -> Non
         packages = load_config(cfg)
         assert packages, f"README toml block #{idx} declared no packages"
         load_stage_globs(cfg)  # must not raise
+        load_exact_pins(cfg)  # the exact_pins setting must parse+validate too
 
 
 # --- I2: a -latest runner / empty required input fails into the stall path ----

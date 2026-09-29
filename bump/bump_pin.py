@@ -79,6 +79,17 @@ _ANY = r'"{pkg}(?![A-Za-z0-9._-])\s*(?:\[[^"\]]*\])?\s*(?:==|>=|<=|~=|!=|<|>|@)[
 #: The default config path when none is passed.
 _DEFAULT_CONFIG = Path("ci/bump/pins.toml")
 
+#: How an exact ``==A`` pin is rewritten, set by the ``exact_pins`` setting.
+#: ``"range"`` is the documented DEFAULT (used when the setting is absent, not a
+#: silent fallback): ``==A`` becomes a floor + derived next-major ceiling — the
+#: behaviour a temporary dev-channel pin (``==X.Y.Z.devN``) that a release should
+#: replace needs. ``"keep"`` holds the pin EXACT — ``==A`` becomes ``==NEW`` — for
+#: a consumer that freezes its lock with ``[tool.uv] constraint-dependencies``,
+#: where ``==`` must stay exact and simply advance. Range and floor-only shapes
+#: are unaffected by this setting.
+_EXACT_PINS_MODES = ("range", "keep")
+_DEFAULT_EXACT_PINS = "range"
+
 
 class ConfigError(Exception):
     """``pins.toml`` is missing or malformed. Names the offender."""
@@ -154,6 +165,60 @@ def load_config(path: Path) -> dict[str, tuple[str, ...]]:
     return packages
 
 
+def _validate_exact_pins_value(value: object, where: str) -> str | None:
+    """Validate one ``exact_pins`` value (global or per-package), or ``None`` if absent.
+
+    An empty string or an unknown value is a loud ``ConfigError`` NAMING the
+    problem -- a silently accepted bad value is how a bump picks the wrong rule.
+    """
+    if value is None:
+        return None
+    allowed = ", ".join(_EXACT_PINS_MODES)
+    if not isinstance(value, str) or value == "":
+        raise ConfigError(
+            f"pins config: {where} exact_pins must be a non-empty string, one of "
+            f"{allowed}"
+        )
+    if value not in _EXACT_PINS_MODES:
+        raise ConfigError(
+            f"pins config: {where} exact_pins {value!r} is not a valid value; "
+            f"allowed: {allowed}"
+        )
+    return value
+
+
+def load_exact_pins(path: Path) -> dict[str, str]:
+    """Resolve the ``exact_pins`` rule for every declared package.
+
+    A top-level ``exact_pins`` sets the global rule (``"range"`` when absent -- the
+    documented default, not a silent fallback). A ``[[package]]`` may carry its own
+    ``exact_pins`` that WINS for that package. Every value -- global or per-package --
+    is validated to one of ``_EXACT_PINS_MODES``; an empty string or unknown value
+    is a loud ``ConfigError``. Returns ``{package: resolved_rule}``.
+
+    Structural validation of ``[[package]]`` is ``load_config``'s job (called
+    first by every caller); here we read only names and the ``exact_pins`` values.
+    """
+    if not path.exists():
+        raise ConfigError(f"pins config: {path} does not exist")
+    data = tomllib.loads(path.read_text())
+    global_mode = _validate_exact_pins_value(data.get("exact_pins"), "top-level")
+    if global_mode is None:
+        global_mode = _DEFAULT_EXACT_PINS
+    resolved: dict[str, str] = {}
+    entries = data.get("package")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            override = _validate_exact_pins_value(entry.get("exact_pins"), f"package {name!r}")
+            resolved[name] = override if override is not None else global_mode
+    return resolved
+
+
 def load_stage_globs(path: Path) -> tuple[str, ...]:
     """Parse the top-level ``stage_globs`` list from ``pins.toml``.
 
@@ -210,15 +275,19 @@ def _derive_ceiling(version: str) -> str:
     return f"<{int(major) + 1}.0.0"
 
 
-def _classify_occurrence(pin: str, package: str, version: str) -> tuple[str, str] | None:
+def _classify_occurrence(
+    pin: str, package: str, version: str, exact_pins: str = _DEFAULT_EXACT_PINS
+) -> tuple[str, str] | None:
     """Rewrite ONE matched pin string, classified by its own shape.
 
     ``pin`` is a complete ``"pkg..."`` occurrence (an ``_ANY`` match). Returns
     ``(new_pin_string, description)`` for a range/exact/floor shape, or ``None``
     if it is none of the three — the caller turns that into a loud, line-named
-    failure. Each shape is derived EXACTLY as the single-occurrence logic derived
-    it before: the range ceiling is preserved verbatim, the exact ceiling is
-    derived from the version's major, the floor keeps having no ceiling.
+    failure. The range ceiling is preserved verbatim and the floor keeps having no
+    ceiling, regardless of ``exact_pins``. An exact ``==A`` pin follows
+    ``exact_pins``: ``"range"`` (the default) becomes a floor + derived next-major
+    ceiling; ``"keep"`` stays exact as ``==NEW``. The description NAMES which rule
+    applied so the run log tells them apart.
     """
     pkg = re.escape(package)
 
@@ -235,11 +304,18 @@ def _classify_occurrence(pin: str, package: str, version: str) -> tuple[str, str
 
     exact = re.fullmatch(_EXACT.format(pkg=pkg), pin)
     if exact is not None:
+        if exact_pins == "keep":
+            return (
+                f'"{package}=={version}"',
+                f"{package}=={version} "
+                f"(was an exact == pin; KEPT exact per exact_pins=keep)",
+            )
         derived = _derive_ceiling(version)
         return (
             f'"{package}>={version},{derived}"',
             f"{package}>={version},{derived} "
-            f"(was an exact == pin; ceiling DERIVED from the version's major)",
+            f"(was an exact == pin; ceiling DERIVED from the version's major "
+            "per exact_pins=range)",
         )
 
     floor_only = re.fullmatch(_FLOOR_ONLY.format(pkg=pkg), pin)
@@ -252,14 +328,17 @@ def _classify_occurrence(pin: str, package: str, version: str) -> tuple[str, str
     return None
 
 
-def rewrite_pin(text: str, package: str, version: str) -> tuple[str, str]:
+def rewrite_pin(
+    text: str, package: str, version: str, exact_pins: str = _DEFAULT_EXACT_PINS
+) -> tuple[str, str]:
     """Rewrite EVERY occurrence of ``package``'s pin in ``text`` to a floor of
-    ``version``.
+    ``version`` (or, for an exact pin under ``exact_pins="keep"``, to ``==NEW``).
 
     Returns ``(new_text, human_description)``. The description names how many
-    occurrences were rewritten and, per occurrence, whether the ceiling was
-    PRESERVED, DERIVED or absent — so a reader of the run log can tell each
-    apart without opening the diff.
+    occurrences were rewritten and, per occurrence, which rule applied — the
+    ceiling PRESERVED, an exact pin's ceiling DERIVED (``exact_pins=range``), an
+    exact pin KEPT as ``==`` (``exact_pins=keep``), or a floor with no ceiling —
+    so a reader of the run log can tell each apart without opening the diff.
 
     Every ``_ANY`` occurrence is enumerated and classified once, by position
     (`re.finditer` yields non-overlapping matches, so occurrences never overlap
@@ -290,7 +369,7 @@ def rewrite_pin(text: str, package: str, version: str) -> tuple[str, str]:
     outcomes: list[tuple[re.Match[str], tuple[str, str]]] = []
     unsupported: list[str] = []
     for match in matches:
-        outcome = _classify_occurrence(match.group(0), package, version)
+        outcome = _classify_occurrence(match.group(0), package, version, exact_pins)
         if outcome is None:
             line = text.count("\n", 0, match.start()) + 1
             unsupported.append(f"{match.group(0)} (line {line})")
@@ -347,11 +426,19 @@ def _pinned_elsewhere(
 
 
 def rewrite_pin_for_package(
-    package: str, version: str, config: dict[str, tuple[str, ...]], *, root: Path = Path(".")
+    package: str,
+    version: str,
+    config: dict[str, tuple[str, ...]],
+    *,
+    root: Path = Path("."),
+    exact_pins: str = _DEFAULT_EXACT_PINS,
 ) -> list[tuple[Path, str]]:
     """Bump ``package``'s pin in EVERY declared file, and write each.
 
     Returns ``[(path_written, human_description), ...]`` — one entry per file.
+
+    ``exact_pins`` (the package's resolved ``exact_pins`` rule) decides how an
+    exact ``==A`` pin is rewritten — a range (default) or kept exact as ``==NEW``.
 
     On a miss, the OTHER mapped files are searched purely to build the error: a
     package pinned in this repo but not where the bump looked, reported as
@@ -365,7 +452,7 @@ def rewrite_pin_for_package(
     for relative in files:
         path = _resolve_file(relative, package, root)
         try:
-            new_text, description = rewrite_pin(path.read_text(), package, version)
+            new_text, description = rewrite_pin(path.read_text(), package, version, exact_pins)
         except PinNotFoundError as exc:
             elsewhere = _pinned_elsewhere(package, root, config, excluding=own)
             if elsewhere:
@@ -582,7 +669,23 @@ def main(argv: list[str] | None = None) -> int:
     _, package, version = args.tokens
 
     try:
-        written = rewrite_pin_for_package(package, version, config, root=args.root)
+        exact_pins = load_exact_pins(args.config)
+    except ConfigError as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        return 1
+    if package not in exact_pins:
+        # An undeclared package has no file and no rule: fail here, loudly, rather
+        # than defaulting its exact_pins rule and letting a later step decide.
+        print(
+            f"::error::{package!r} is not declared in pins.toml, so there is no file "
+            f"to bump. Known: {', '.join(sorted(exact_pins))}",
+            file=sys.stderr,
+        )
+        return 1
+    mode = exact_pins[package]
+
+    try:
+        written = rewrite_pin_for_package(package, version, config, root=args.root, exact_pins=mode)
     except (
         PinNotFoundError,
         UnknownConsumerError,

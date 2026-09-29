@@ -33,6 +33,7 @@ from bump_pin import (  # noqa: E402
     classify_changes,
     consumer_files,
     load_config,
+    load_exact_pins,
     load_stage_globs,
     main,
     package_names,
@@ -920,3 +921,211 @@ def test_config_package_entry_not_a_table_raises_configerror(tmp_path: Path) -> 
     with pytest.raises(ConfigError) as exc:
         load_config(config)
     assert "table" in str(exc.value)
+
+
+# --- exact_pins: keep vs range -----------------------------------------------
+# The `bump` action rewrites an exact `==A` pin as a range by default (the
+# dev-channel `==X.Y.Z.devN` case a release replaces). A consumer that freezes
+# its lock with `[tool.uv] constraint-dependencies` needs `==` to stay exact and
+# advance to `==NEW`; `exact_pins = "keep"` is that rule.
+
+
+def test_exact_pins_keep_holds_the_pin_exact() -> None:
+    """With keep, an exact `==A` pin advances to `==NEW`, staying exact."""
+    new, desc = rewrite_pin(A_EXACT, "lib-a", "2.19.0", exact_pins="keep")
+    assert '"lib-a==2.19.0"' in new
+    assert '"lib-a==2.18.0.dev170"' not in new
+    assert ">=" not in new
+    assert "KEPT exact" in desc
+    assert "exact_pins=keep" in desc
+
+
+def test_exact_pins_range_is_the_explicit_default() -> None:
+    """Passing "range" explicitly is identical to today's default behaviour: the
+    exact pin becomes a floor + derived next-major ceiling."""
+    new, desc = rewrite_pin(A_EXACT, "lib-a", "2.19.0", exact_pins="range")
+    assert '"lib-a>=2.19.0,<3.0.0"' in new
+    assert "DERIVED" in desc
+    # The default (no argument) matches the explicit "range".
+    assert rewrite_pin(A_EXACT, "lib-a", "2.19.0") == (new, desc)
+
+
+def test_exact_pins_keep_leaves_range_and_floor_shapes_unaffected() -> None:
+    """keep only changes the exact-pin rule; a range keeps its preserved ceiling
+    and a bare floor stays ceiling-free."""
+    ranged, rdesc = rewrite_pin(A_RANGE, "lib-a", "2.19.0", exact_pins="keep")
+    assert '"lib-a>=2.19.0,<3.0.0"' in ranged
+    assert "ceiling preserved" in rdesc
+    floor, fdesc = rewrite_pin(D_FLOOR_ONLY, "lib-d", "0.6.0", exact_pins="keep")
+    assert '"lib-d>=0.6.0"' in floor
+    assert "<" not in floor
+    assert "no ceiling" in fdesc
+
+
+# The nfl-dk shape: two `>=,<` pins (in `[project.dependencies]` and a
+# `[dependency-groups]` group) PLUS a `[tool.uv] constraint-dependencies` `==`
+# freeze. With keep, the ranges bump and the constraint stays exact as `==NEW`.
+NFL_DK_SHAPE = (
+    "[project]\n"
+    "dependencies = [\n"
+    '    "bh-lake>=0.4.0,<1.0.0",\n'
+    "]\n"
+    "\n"
+    "[dependency-groups]\n"
+    "lambda = [\n"
+    '    "bh-lake>=0.4.0,<1.0.0",\n'
+    "]\n"
+    "\n"
+    "[tool.uv]\n"
+    "constraint-dependencies = [\n"
+    '    "bh-lake==0.4.0",\n'
+    "]\n"
+)
+
+
+def test_exact_pins_keep_on_the_nfl_dk_shape_bumps_ranges_and_keeps_the_constraint() -> None:
+    new, desc = rewrite_pin(NFL_DK_SHAPE, "bh-lake", "0.5.0", exact_pins="keep")
+    # Two ranges bumped, ceiling preserved.
+    assert new.count('"bh-lake>=0.5.0,<1.0.0"') == 2
+    # The constraint `==` freeze stays exact and advances.
+    assert '"bh-lake==0.5.0"' in new
+    assert '"bh-lake==0.4.0"' not in new
+    assert "3 occurrences rewritten" in desc
+    assert "ceiling preserved" in desc
+    assert "KEPT exact" in desc
+
+
+def test_exact_pins_range_on_the_nfl_dk_shape_turns_the_constraint_into_a_range() -> None:
+    """The default (range) rewrites the constraint `==` into a range too — the
+    behaviour the keep mode exists to override."""
+    new, _ = rewrite_pin(NFL_DK_SHAPE, "bh-lake", "0.5.0")
+    assert new.count('"bh-lake>=0.5.0,<1.0.0"') == 3
+    assert "==" not in new
+
+
+# --- load_exact_pins: global default, per-package override, validation -------
+
+
+def _write_config_exact(
+    tmp_path: Path, packages: dict[str, list[str]], *, body_prefix: str = ""
+) -> Path:
+    lines = [
+        'lock_command = ""',
+        'post_lock_command = ""',
+        'stall_label = "chain-stall"',
+    ]
+    if body_prefix:
+        lines.append(body_prefix)
+    for name, files in packages.items():
+        flist = ", ".join(f'"{f}"' for f in files)
+        lines += ["[[package]]", f'name = "{name}"', f"files = [{flist}]"]
+    path = tmp_path / "pins.toml"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_exact_pins_absent_resolves_to_range(tmp_path: Path) -> None:
+    """No setting = the documented default 'range' for every package."""
+    config = _toml(tmp_path, '[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n')
+    assert load_exact_pins(config) == {"lib-a": "range"}
+
+
+def test_exact_pins_global_applies_to_all_packages(tmp_path: Path) -> None:
+    config = _toml(
+        tmp_path,
+        'exact_pins = "keep"\n'
+        '[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n'
+        '[[package]]\nname = "lib-b"\nfiles = ["b.toml"]\n',
+    )
+    assert load_exact_pins(config) == {"lib-a": "keep", "lib-b": "keep"}
+
+
+def test_per_package_exact_pins_wins_over_the_global(tmp_path: Path) -> None:
+    """The per-package value beats the global one for that package only."""
+    config = _toml(
+        tmp_path,
+        'exact_pins = "keep"\n'
+        '[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\nexact_pins = "range"\n'
+        '[[package]]\nname = "lib-b"\nfiles = ["b.toml"]\n',
+    )
+    assert load_exact_pins(config) == {"lib-a": "range", "lib-b": "keep"}
+
+
+def test_exact_pins_empty_global_is_named(tmp_path: Path) -> None:
+    config = _toml(
+        tmp_path,
+        'exact_pins = ""\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n',
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_exact_pins(config)
+    assert "exact_pins" in str(exc.value) and "non-empty" in str(exc.value)
+
+
+def test_exact_pins_unknown_global_is_named(tmp_path: Path) -> None:
+    config = _toml(
+        tmp_path,
+        'exact_pins = "loose"\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n',
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_exact_pins(config)
+    assert "exact_pins" in str(exc.value) and "loose" in str(exc.value)
+
+
+def test_exact_pins_unknown_per_package_is_named(tmp_path: Path) -> None:
+    config = _toml(
+        tmp_path,
+        '[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\nexact_pins = "nope"\n',
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_exact_pins(config)
+    assert "lib-a" in str(exc.value) and "nope" in str(exc.value)
+
+
+def test_exact_pins_empty_per_package_is_named(tmp_path: Path) -> None:
+    config = _toml(
+        tmp_path,
+        '[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\nexact_pins = ""\n',
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_exact_pins(config)
+    assert "lib-a" in str(exc.value) and "non-empty" in str(exc.value)
+
+
+def test_set_keeps_the_constraint_exact_end_to_end(tmp_path: Any) -> None:
+    """Through `main set`: with keep, the nfl-dk constraint `==` advances exact."""
+    (tmp_path / "packages" / "lib").mkdir(parents=True)
+    target = tmp_path / "packages" / "lib" / "pyproject.toml"
+    target.write_text(NFL_DK_SHAPE)
+    config = _write_config_exact(tmp_path, {"bh-lake": [LIB]}, body_prefix='exact_pins = "keep"')
+
+    rc = main(["set", "bh-lake", "0.5.0", "--root", str(tmp_path), "--config", str(config)])
+    assert rc == 0
+    written = target.read_text()
+    assert written.count('"bh-lake>=0.5.0,<1.0.0"') == 2
+    assert '"bh-lake==0.5.0"' in written
+
+
+def test_set_per_package_keep_overrides_global_range(tmp_path: Any) -> None:
+    """A per-package keep beats a global range through the `set` command."""
+    (tmp_path / "packages" / "lib").mkdir(parents=True)
+    target = tmp_path / "packages" / "lib" / "pyproject.toml"
+    target.write_text('    "bh-lake==0.4.0",\n')
+    config = _toml(
+        tmp_path,
+        'lock_command = ""\npost_lock_command = ""\nstall_label = "chain-stall"\n'
+        'exact_pins = "range"\n'
+        f'[[package]]\nname = "bh-lake"\nfiles = ["{LIB}"]\nexact_pins = "keep"\n',
+    )
+    rc = main(["set", "bh-lake", "0.5.0", "--root", str(tmp_path), "--config", str(config)])
+    assert rc == 0
+    assert '"bh-lake==0.5.0"' in target.read_text()
+
+
+def test_set_undeclared_package_fails_before_any_rule_is_chosen(tmp_path, capsys):
+    """An undeclared package is refused up front; no exact_pins rule is defaulted."""
+    (tmp_path / "pyproject.toml").write_text('dependencies = ["lib-a>=1.0.0,<2.0.0"]\n')
+    cfg = tmp_path / "pins.toml"
+    cfg.write_text('exact_pins = "keep"\n[[package]]\nname = "lib-a"\nfiles = ["pyproject.toml"]\n')
+    rc = main(["set", "lib-z", "1.2.3", "--root", str(tmp_path), "--config", str(cfg)])
+    assert rc == 1
+    assert "'lib-z' is not declared in pins.toml" in capsys.readouterr().err
