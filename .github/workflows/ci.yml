@@ -112,6 +112,24 @@ jobs:
         shell: bash
         run: bash tested-tree/tests/check.sh
 
+  images:
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12.11", "3.14.0"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "${{ matrix.python-version }}"
+      - name: Install test deps
+        shell: bash
+        run: python -m pip install --disable-pip-version-check pytest pyyaml
+      - name: images tests
+        shell: bash
+        run: python -m pytest images/tests -q
+
   release-version:
     runs-on: ubuntu-26.04
     steps:

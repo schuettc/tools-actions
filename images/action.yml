@@ -1,0 +1,119 @@
+name: Container images (build-once)
+description: >-
+  Runs this action's images.py inside the calling job: build, verify, promote
+  and check container images that CDK content-addresses but that must be built
+  once in CI and promoted by digest (never rebuilt for prod).
+
+  This action owns NO AWS credentials — the calling job configures its own role,
+  because repos differ. When given accounts, it only performs `docker login` to
+  each account's ECR registry in the `region` from the images config (a project
+  fact read from config, never an input default).
+
+inputs:
+  command:
+    description: "images.py subcommand: build|assert-present|promote|check-deployed|digests|list."
+    required: true
+  cdk-out:
+    description: "cdk.out directory holding the synthesized *.assets.json manifests."
+    required: true
+  config:
+    description: "Path to the consumer-owned images.toml config."
+    required: false
+    default: "ci/images/images.toml"
+  args:
+    description: >-
+      Extra arguments passed through verbatim to images.py after --cdk-out
+      (e.g. --account, --mode, --cache, --registry, --function-map). Never pass
+      --github-output: the action wires it for `promote` itself (see below), and
+      a caller passing it here fails loudly so the two cannot conflict.
+    required: false
+    default: ""
+  ecr-login-accounts:
+    description: >-
+      Space-separated account ids to `docker login` to, each at its ECR registry
+      in the region from the images config. Empty = no login (the default).
+    required: false
+    default: ""
+  setup-buildx:
+    description: "Set up docker buildx before running (needed for `build`). true|false."
+    required: false
+    default: "false"
+
+# For the `promote` command this action appends `--github-output "$GITHUB_OUTPUT"`
+# itself, inside the run step where the shell expands $GITHUB_OUTPUT (a `with:`
+# value is NOT shell-expanded, so a caller passing it via `args` would hand
+# images.py the literal string "$GITHUB_OUTPUT" and dev-digests would never be
+# written). images.py then writes `dev-digests=<json>` to the run step's output;
+# this surfaces it as the action's own output so the calling job can hand the
+# verified {hash: dev_digest} map to check-deployed. Callers never pass
+# --github-output.
+outputs:
+  dev-digests:
+    description: "The verified {hash: dev_digest} JSON map promote wrote (empty for other commands)."
+    value: ${{ steps.run.outputs.dev-digests }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Docker Buildx
+      if: ${{ inputs.setup-buildx == 'true' }}
+      uses: docker/setup-buildx-action@v4.4.1
+
+    - name: Log in to ECR
+      if: ${{ inputs.ecr-login-accounts != '' }}
+      shell: bash
+      env:
+        ECR_LOGIN_ACCOUNTS: ${{ inputs.ecr-login-accounts }}
+        IMAGES_CONFIG: ${{ inputs.config }}
+      run: |
+        set -euo pipefail
+        # The ECR region is a project fact — read it from the images config,
+        # never an input default. A missing key raises loudly (no silent
+        # fallback).
+        region="$(python3 -c 'import tomllib, pathlib, os, sys
+        cfg = tomllib.loads(pathlib.Path(os.environ["IMAGES_CONFIG"]).read_text())
+        if "region" not in cfg:
+            sys.exit("images.toml: missing required key \x27region\x27")
+        print(cfg["region"])')"
+        for account in $ECR_LOGIN_ACCOUNTS; do
+          registry="${account}.dkr.ecr.${region}.amazonaws.com"
+          aws ecr get-login-password --region "$region" \
+            | docker login --username AWS --password-stdin "$registry"
+        done
+
+    - name: Run images.py
+      id: run
+      shell: bash
+      env:
+        IMAGES_COMMAND: ${{ inputs.command }}
+        IMAGES_CDK_OUT: ${{ inputs.cdk-out }}
+        IMAGES_CONFIG: ${{ inputs.config }}
+        IMAGES_ARGS: ${{ inputs.args }}
+      run: |
+        set -euo pipefail
+        # This action owns wiring promote's output. Callers must never pass
+        # --github-output via `args`: a `with:` value is not shell-expanded, so
+        # $GITHUB_OUTPUT would reach images.py as a literal string. Reject it
+        # loudly so a caller-supplied flag can never conflict with ours.
+        case " $IMAGES_ARGS " in
+          *" --github-output "*|*" --github-output="*)
+            echo "images action: do not pass --github-output in args; the action wires it for promote itself" >&2
+            exit 1
+            ;;
+        esac
+        # For `promote`, append --github-output HERE (the shell expands
+        # $GITHUB_OUTPUT) so images.py writes dev-digests to the step output.
+        github_output=()
+        if [ "$IMAGES_COMMAND" = "promote" ]; then
+          # GITHUB_OUTPUT is a GitHub-provided env var (SC2153 false positive).
+          # shellcheck disable=SC2153
+          github_output=(--github-output "$GITHUB_OUTPUT")
+        fi
+        # IMAGES_ARGS is an intentional passthrough that must word-split into
+        # separate argv entries, so it is deliberately left unquoted.
+        # shellcheck disable=SC2086
+        python3 "$GITHUB_ACTION_PATH/images.py" "$IMAGES_COMMAND" \
+          --config "$IMAGES_CONFIG" \
+          --cdk-out "$IMAGES_CDK_OUT" \
+          $IMAGES_ARGS \
+          ${github_output[@]+"${github_output[@]}"}

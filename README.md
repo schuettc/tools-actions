@@ -20,6 +20,9 @@ release:
   packages and publishes a Go tool to its GitHub release and download page.
 - [`go-ci`](go-ci/README.md): the family Go gate (gofmt, vet, golangci-lint,
   race tests, cross-build).
+- [`images`](images/README.md): builds a CDK project's container images once in
+  CI, guards deploys (assert-present), promotes dev→prod by digest, and checks
+  what's deployed (container Lambda + AWS Batch).
 
 Each action's README describes its inputs, outputs, and usage.
 
