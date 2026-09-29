@@ -28,6 +28,7 @@ linters:
   settings:
     gosec:
       excludes:
+        - G107 # HTTP GET of a variable URL: tools fetch their configured and /dl URLs by design
         - G204 # exec with a variable: these are CLIs that run tools by design
         - G301 # directory permissions: callers choose them deliberately
         - G302 # file permissions (chmod): ditto
