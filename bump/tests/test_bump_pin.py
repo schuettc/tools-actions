@@ -742,3 +742,21 @@ def test_stage_globs_empty_string_entry_is_named(tmp_path: Path) -> None:
 def test_stage_globs_absent_is_empty_tuple(tmp_path: Path) -> None:
     config = _toml(tmp_path, '[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n')
     assert load_stage_globs(config) == ()
+
+
+def test_config_package_table_not_array_raises_configerror(tmp_path: Path) -> None:
+    """A `[package]` TABLE instead of a `[[package]]` array-of-tables must raise a
+    ConfigError that names the fix — not crash with a bare TypeError (M5)."""
+    config = _toml(tmp_path, '[package]\nname = "lib-a"\nfiles = ["a.toml"]\n')
+    with pytest.raises(ConfigError) as exc:
+        load_config(config)
+    assert "[[package]]" in str(exc.value)
+
+
+def test_config_package_entry_not_a_table_raises_configerror(tmp_path: Path) -> None:
+    """An array element that is not a table (e.g. a bare string) is named, not a
+    TypeError."""
+    config = _toml(tmp_path, 'package = ["lib-a"]\n')
+    with pytest.raises(ConfigError) as exc:
+        load_config(config)
+    assert "table" in str(exc.value)

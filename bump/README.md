@@ -9,8 +9,10 @@ older bump PRs, regenerates on a merge conflict, and opens a loud **stall issue*
 on any un-merged ending (failure *or* cancellation). No bump stalls silently.
 
 It ships two stdlib-only scripts beside `action.yml`, run under the runner's own
-`python3` (the action installs no Python): **Python 3.12+** is required (tested on
-3.12 and 3.14).
+`python3`: **Python 3.12+** is required (tested on 3.12 and 3.14). The action
+itself installs a Python toolchain with `uv python install` — that is for the
+consumer's own relock (`lock_command`), not for the two bump scripts, which run
+under the runner's pre-installed `python3`.
 
 - `bump_pin.py` — the ONE pin rewriter. It preserves a `>=A,<B` range's ceiling,
   derives a next-major ceiling for an exact `==A` (dev-channel) pin, keeps a bare
@@ -46,6 +48,18 @@ on:
 
 jobs:
   bump:
+    # A called reusable workflow can only NARROW the caller's token, never widen
+    # it, and the default GITHUB_TOKEN carries no id-token. Without this block the
+    # call hits a startup failure — no job, no stall issue. Grant every scope the
+    # reusable workflow declares (writes go through the App token, so most are
+    # read; issues:write files the stall issue; id-token:write is for OIDC).
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: read
+      issues: write
+      actions: read
+      checks: read
     uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.7.0
     with:
       package: ${{ github.event_name == 'workflow_dispatch' && inputs.package || github.event.client_payload.package }}
@@ -55,6 +69,7 @@ jobs:
       base_branch: dev
       app_client_id: ${{ vars.RELEASE_APP_CLIENT_ID }}
       runner: ubuntu-26.04 # an exact image label, never a *-latest alias
+      stall_label: chain-stall # MUST match stall_label in pins.toml (the pre-checkout fallback)
       private_index: "" # or the CodeArtifact JSON below
     secrets:
       app_private_key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -68,9 +83,10 @@ stall step lives in the reusable workflow, **not** in the composite, because a
 job-timeout cancellation does not run a composite action's post-failure steps;
 keeping it at the job level is what makes "stall on cancellation" work.
 
-### `check_consumer` defaults to false
+### `check_consumer` is required
 
-This is a single-producer design: with `check_consumer: false`, a missing or
+`check_consumer` is a **required** input (there is no default — every caller
+states its intent). This is a single-producer design: with `check_consumer: false`, a missing or
 unrewritable pin **fails loudly to the stall issue**, never a silent green skip.
 Set it `true` only for a genuine fan-out (a producer whose consumer may
 legitimately not pin it yet).
@@ -86,7 +102,8 @@ loud error that names the offender.
 | --- | --- |
 | `lock_command` | Shell command to relock after the pin moves; `{package}` is substituted. `""` = no lock. |
 | `post_lock_command` | Shell command run after the lock (e.g. an export script). `""` = none. |
-| `stall_label` | The label carried by the one stall issue per package. **Required and non-empty** when a config is supplied — a missing key, an empty string, or a non-string value fails loudly (no silent fallback to a label the workflow does not agree with). |
+| `stall_label` | The label carried by the one stall issue per package. **Required and non-empty** when a config is supplied — a missing key, an empty string, or a non-string value fails loudly (no silent fallback to a label the workflow does not agree with). Pass the SAME value as the `stall_label` workflow input (that input is the pre-checkout fallback). |
+| `required_check` | The name of the required status check the await loop gates the merge on (e.g. `CI`). **Required and non-empty** — a consumer whose gate is not named `CI` would otherwise stall on a 20-minute "timeout" instead of reading its own red check. |
 | `stage_globs` | Paths/globs the lock and post-lock commands may change (the lock file plus any exported outputs). Pinned files are always allowed; **anything else the bump changed fails loudly**. |
 | `[[package]]` `name` + `files` | Each consumed package and the file(s) its pin lives in. A package pinned in more than one file has every file rewritten. |
 
@@ -98,6 +115,7 @@ poetry, npm or anything else just lists the file(s) its command writes in
 lock_command = "uv lock --upgrade-package {package}"
 post_lock_command = ""
 stall_label = "chain-stall"
+required_check = "CI"
 # The lock file the command writes, plus any exported outputs. A lock file NOT
 # listed here is a stray change and fails the bump loudly (a visible
 # misconfiguration, never a silent sweep).
@@ -118,6 +136,7 @@ A public-index, no-relock project is simply:
 lock_command = ""
 post_lock_command = ""
 stall_label = "chain-stall"
+required_check = "CI"
 stage_globs = []
 
 [[package]]
@@ -172,18 +191,25 @@ the index before opening the PR, and exports a token for the relock:
   `pull_request` CI (a `GITHUB_TOKEN`-opened PR does not, by anti-recursion), so
   native auto-merge can land the bump. CI status is read with the workflow's own
   `GITHUB_TOKEN` — the App installation token cannot see the status rollup.
-- A **required check named `CI`** on the base branch: the await loop treats a red
-  `CI` run as a real failure (and stalls), while a non-required advisory workflow
-  going red never stalls a bump.
+- A **required status check** on the base branch, named by `required_check` in
+  `pins.toml` (e.g. `CI`): the await loop treats a red run of that check as a real
+  failure (and stalls), while a non-required advisory workflow going red never
+  stalls a bump. The name is a per-consumer setting, not hardcoded — a consumer
+  whose gate is named something else sets `required_check` to that name.
 
 ## Pinning
 
 Pin the reusable workflow (and, if you use it directly, this action) to an exact
-release tag — never a branch or `@main`:
+release tag — never a branch or `@main`. The reusable workflow is called at the
+JOB level (`jobs.<id>.uses`), not as a step:
 
 ```yaml
-- uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.7.0
+jobs:
+  bump:
+    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.7.0
 ```
+
+If you use the composite action directly, it is a step-level `uses`:
 
 ```yaml
 - uses: schuettc/tools-actions/bump@v0.7.0

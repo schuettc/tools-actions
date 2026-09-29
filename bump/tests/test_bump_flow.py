@@ -607,3 +607,216 @@ def test_main_stall_empty_label_exits_1_and_names_it(
     assert "::error::" in err and "stall_label" in err and "empty" in err
     # No gh call was made — it failed before touching GitHub.
     assert fake.calls == []
+
+
+# --- required_check is a pins.toml setting (I5) ------------------------------
+
+
+def test_required_check_defaults_to_CI_when_no_config() -> None:
+    """The built-in default applies ONLY when no --config is supplied (offline)."""
+    assert bump_flow._required_check(None) == bump_flow.REQUIRED_CHECK == "CI"
+
+
+def test_required_check_read_from_config(tmp_path: Path) -> None:
+    config = tmp_path / "pins.toml"
+    config.write_text(
+        'required_check = "build-and-test"\n'
+        'stall_label = "chain-stall"\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n'
+    )
+    assert bump_flow._required_check(config) == "build-and-test"
+
+
+def test_required_check_missing_key_raises(tmp_path: Path) -> None:
+    config = tmp_path / "pins.toml"
+    config.write_text('stall_label = "chain-stall"\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n')
+    with pytest.raises(bump_flow.ConfigError) as exc:
+        bump_flow._required_check(config)
+    assert "required_check" in str(exc.value) and "missing" in str(exc.value)
+
+
+def test_required_check_empty_raises(tmp_path: Path) -> None:
+    config = tmp_path / "pins.toml"
+    config.write_text('required_check = ""\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n')
+    with pytest.raises(bump_flow.ConfigError) as exc:
+        bump_flow._required_check(config)
+    assert "required_check" in str(exc.value) and "empty" in str(exc.value)
+
+
+def test_required_check_wrong_type_raises(tmp_path: Path) -> None:
+    config = tmp_path / "pins.toml"
+    config.write_text('required_check = 5\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n')
+    with pytest.raises(bump_flow.ConfigError) as exc:
+        bump_flow._required_check(config)
+    assert "required_check" in str(exc.value) and "string" in str(exc.value)
+
+
+def test_await_uses_the_configured_required_check(monkeypatch: Any, tmp_path: Path) -> None:
+    """A red run of the CONFIGURED check name (not the hardcoded 'CI') stalls; a
+    red run named 'CI' is ignored when the configured gate is something else."""
+    config = tmp_path / "pins.toml"
+    config.write_text(
+        'required_check = "build-and-test"\n'
+        'stall_label = "chain-stall"\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n'
+    )
+
+    def respond(args: list[str]) -> str | None:
+        if "view" in args:
+            return _pr_view("OPEN", "BLOCKED", sha="cafef00d")
+        if "api" in args:
+            return _runs(
+                [
+                    {"name": "CI", "status": "completed", "conclusion": "failure"},
+                    {"name": "build-and-test", "status": "completed", "conclusion": "failure"},
+                ]
+            )
+        return None
+
+    fake = FakeRun(respond)
+    _install(monkeypatch, fake)
+
+    code = bump_flow.main(
+        [
+            "await",
+            "--repo",
+            REPO,
+            "--package",
+            PKG,
+            "--pr",
+            "https://example/pr/1",
+            "--timeout-min",
+            "5",
+            "--poll-sec",
+            "1",
+            "--config",
+            str(config),
+        ]
+    )
+    assert code == 30  # failed -> unmerged
+
+
+def test_await_ignores_a_red_CI_when_the_gate_is_named_otherwise(
+    monkeypatch: Any, tmp_path: Path, capsys: Any
+) -> None:
+    config = tmp_path / "pins.toml"
+    config.write_text(
+        'required_check = "build-and-test"\n'
+        'stall_label = "chain-stall"\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n'
+    )
+    clock = iter([0.0, 10_000.0])
+
+    def respond(args: list[str]) -> str | None:
+        if "view" in args:
+            return _pr_view("OPEN", "BLOCKED")
+        if "api" in args:
+            # 'CI' is red but is NOT the configured gate -> not a failure.
+            return _runs([{"name": "CI", "status": "completed", "conclusion": "failure"}])
+        return None
+
+    fake = FakeRun(respond)
+    monkeypatch.setattr(bump_flow, "_run", fake)
+    monkeypatch.setattr(bump_flow, "_sleep", lambda _s: None)
+    monkeypatch.setattr(bump_flow, "_now", lambda: next(clock))
+
+    code = bump_flow.main(
+        [
+            "await", "--repo", REPO, "--package", PKG, "--pr", "https://example/pr/1",
+            "--timeout-min", "5", "--poll-sec", "1", "--config", str(config),
+        ]
+    )
+    assert code == 30
+    assert capsys.readouterr().out.startswith("outcome=timeout")
+
+
+# --- stall path is resilient before checkout / to a bad config (I1) ----------
+
+
+def _stall_argv(config: str | None, label: str | None) -> list[str]:
+    argv = [
+        "stall", "--repo", REPO, "--package", PKG, "--version", "1.44.3",
+        "--reason", "workflow step failed: mint-app-token", "--pr", "-",
+        "--run", "https://example/run/9",
+    ]
+    if config is not None:
+        argv += ["--config", config]
+    if label is not None:
+        argv += ["--stall-label", label]
+    return argv
+
+
+def _stall_responder() -> Callable[[list[str]], str | None]:
+    def respond(args: list[str]) -> str | None:
+        if "label" in args and "create" in args:
+            return ""
+        if "issue" in args and "list" in args:
+            return "[]"
+        if "issue" in args and "create" in args:
+            return "https://example/issues/9\n"
+        return None
+
+    return respond
+
+
+def test_stall_files_issue_when_config_is_absent_using_fallback_label(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """A failure BEFORE checkout leaves pins.toml absent. The stall issue is still
+    filed, under the fallback stall_label, and the body records the config error."""
+    fake = FakeRun(_stall_responder())
+    _install(monkeypatch, fake)
+    missing = str(tmp_path / "__absent" / "pins.toml")
+
+    code = bump_flow.main(_stall_argv(missing, "chain-stall"))
+    assert code == 0
+    creates = fake.commands_containing("issue", "create")
+    assert len(creates) == 1
+    body = " ".join(creates[0])
+    assert "chain-stall" in body
+    assert "Config error" in body and "unreadable" in body
+    assert fake.commands_containing("label", "create", "chain-stall")
+
+
+def test_stall_files_issue_when_config_is_malformed_toml(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    fake = FakeRun(_stall_responder())
+    _install(monkeypatch, fake)
+    bad = tmp_path / "pins.toml"
+    bad.write_text('this is = not valid = toml [[[\n')
+
+    code = bump_flow.main(_stall_argv(str(bad), "fallback-label"))
+    assert code == 0
+    creates = fake.commands_containing("issue", "create")
+    assert len(creates) == 1
+    body = " ".join(creates[0])
+    assert "fallback-label" in body
+    assert "Config error" in body and "malformed" in body
+
+
+def test_stall_uses_the_config_label_when_config_is_readable(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """When pins.toml IS readable, the label comes from it (not the fallback) and
+    no config-error note is added."""
+    fake = FakeRun(_stall_responder())
+    _install(monkeypatch, fake)
+    config = tmp_path / "pins.toml"
+    config.write_text(
+        'stall_label = "from-config"\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n'
+    )
+
+    code = bump_flow.main(_stall_argv(str(config), "fallback-label"))
+    assert code == 0
+    creates = fake.commands_containing("issue", "create")
+    body = " ".join(creates[0])
+    assert "from-config" in body
+    assert "Config error" not in body
+    assert fake.commands_containing("label", "create", "from-config")
+
+
+def test_stall_malformed_config_without_fallback_still_raises(tmp_path: Any) -> None:
+    """No fallback (offline callers): the strict path still raises on a bad label,
+    so the resilient behaviour is opt-in via --stall-label."""
+    config = tmp_path / "pins.toml"
+    config.write_text('stall_label = ""\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n')
+    with pytest.raises(bump_flow.ConfigError):
+        bump_flow._stall_label_resilient(config, None)

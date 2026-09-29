@@ -31,6 +31,13 @@ inputs:
   base_branch:
     description: "Branch the bump PR targets (integration branch)."
     required: true
+  runner:
+    description: >-
+      The runs-on label the reusable workflow scheduled this job on. Passed in so
+      this action can reject a *-latest alias or an empty label and fail into the
+      stall path, rather than a floating image silently making a bump
+      irreproducible.
+    required: true
   app_client_id:
     description: "GitHub App client id (a caller Actions variable)."
     required: true
@@ -62,6 +69,39 @@ runs:
       run: |
         set -euo pipefail
         echo "BUMP_SCRIPTS=$GITHUB_ACTION_PATH" >> "$GITHUB_ENV"
+
+    # FIRST validation, right after expose (which set BUMP_SCRIPTS so the
+    # job-level stall step can still run bump_flow.py when this fails). A
+    # *-latest runner alias makes a bump irreproducible; an empty runner or
+    # base_branch is a misconfiguration. Reject them loudly — the reusable
+    # workflow's stall step fires on this failure.
+    #
+    # Limit: an EMPTY runner cannot always be caught here, because the reusable
+    # workflow's `runs-on: <empty>` may fail to schedule the job at all, in which
+    # case no step (and no stall) runs. This check catches it whenever the job
+    # does start, plus every *-latest alias and every empty base_branch.
+    - name: Reject a -latest runner and empty required inputs
+      id: reject_inputs
+      shell: bash
+      env:
+        RUNNER_LABEL: ${{ inputs.runner }}
+        BASE_BRANCH: ${{ inputs.base_branch }}
+      run: |
+        set -euo pipefail
+        if [ -z "$RUNNER_LABEL" ]; then
+          echo "::error::runner is empty — pass an exact image label (e.g. ubuntu-26.04)."
+          exit 1
+        fi
+        case "$RUNNER_LABEL" in
+          *-latest)
+            echo "::error::runner '$RUNNER_LABEL' is a *-latest alias — pin an exact image label (e.g. ubuntu-26.04). A floating alias makes a bump irreproducible."
+            exit 1
+            ;;
+        esac
+        if [ -z "$BASE_BRANCH" ]; then
+          echo "::error::base_branch is empty — pass the integration branch the bump PR targets."
+          exit 1
+        fi
 
     - name: Validate version + package
       id: validate
@@ -363,7 +403,7 @@ runs:
           AWAIT_OUT=$(GH_TOKEN="$READ_TOKEN" \
             python3 "$GITHUB_ACTION_PATH/bump_flow.py" await \
               --repo "$GITHUB_REPOSITORY" --package "$PACKAGE" \
-              --pr "$PR_URL" --timeout-min 20 --poll-sec 30)
+              --pr "$PR_URL" --timeout-min 20 --poll-sec 30 --config "$CONFIG")
           RC=$?
           set -e
           echo "$AWAIT_OUT"
@@ -433,6 +473,7 @@ runs:
       if: ${{ failure() }}
       shell: bash
       env:
+        O_REJECT: ${{ steps.reject_inputs.outcome }}
         O_VALIDATE: ${{ steps.validate.outcome }}
         O_REQUIRE: ${{ steps.require_app.outcome }}
         O_APP: ${{ steps.app_token.outcome }}
@@ -453,6 +494,7 @@ runs:
         REASON="${AWAIT_OUTCOME:-}"
         if [ -z "$REASON" ]; then
           for entry in \
+            "reject-inputs:$O_REJECT" \
             "validate:$O_VALIDATE" \
             "require-app-secrets:$O_REQUIRE" \
             "mint-app-token:$O_APP" \

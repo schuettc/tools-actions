@@ -101,8 +101,21 @@ def load_config(path: Path) -> dict[str, tuple[str, ...]]:
     entries = data.get("package")
     if not entries:
         raise ConfigError(f"pins config: {path} has no [[package]] entries")
+    # `[package]` (a single table) instead of `[[package]]` (an array of tables)
+    # parses to a dict, not a list. Reject it loudly rather than iterating its
+    # keys as if they were package tables (which crashes with a TypeError).
+    if not isinstance(entries, list):
+        raise ConfigError(
+            f"pins config: {path} 'package' must be an array of tables "
+            "([[package]]), not a [package] table"
+        )
     packages: dict[str, tuple[str, ...]] = {}
     for i, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            raise ConfigError(
+                f"pins config: [[package]] #{i} must be a table, got "
+                f"{type(entry).__name__}"
+            )
         if "name" not in entry:
             raise ConfigError(f"pins config: [[package]] #{i} is missing 'name'")
         name = entry["name"]

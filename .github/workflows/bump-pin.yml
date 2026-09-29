@@ -64,6 +64,14 @@ on:
         description: "runs-on label (an exact image, never a -latest alias)"
         required: true
         type: string
+      stall_label:
+        description: >-
+          Fallback stall-issue label, used ONLY when pins.toml is unreadable (a
+          failure before checkout, or a missing/malformed config) so a stall
+          issue is still filed — never a silent default. Set it to the same
+          value as stall_label in pins.toml.
+        required: true
+        type: string
     secrets:
       app_private_key:
         description: "PEM private key of the release App (Contents R/W, Pull requests R/W, Actions R/W)"
@@ -72,11 +80,20 @@ on:
         description: "OIDC role for the private index token (required when private_index is set)"
         required: false
 
+# Minimal GITHUB_TOKEN scopes. Every WRITE to the repo (branch push, PR create,
+# PR merge) goes through the App installation token, so GITHUB_TOKEN itself needs
+# only: issues:write (open/close the stall issue), id-token:write (OIDC), and
+# READ on the rest (checkout, await's PR + CI-status reads).
+#
+# id-token:write is requested UNCONDITIONALLY even though only a private_index
+# consumer mints an OIDC token: a reusable workflow's `permissions:` is static and
+# cannot depend on an input, so it cannot be narrowed for public-index callers.
+# It is inert without a private_index (no OIDC step runs).
 permissions:
-  id-token: write # OIDC -> private-index token for relock
-  contents: write # push the bump branch
-  pull-requests: write # open + merge the PR
-  issues: write # open/close the stall issue
+  id-token: write # OIDC -> private-index token for relock (inert without private_index)
+  contents: read # checkout only; the App token pushes the bump branch
+  pull-requests: read # await reads PR state; the App token opens + merges
+  issues: write # open/close the stall issue (via GITHUB_TOKEN)
   actions: read # read CI run status (await) - the App token cannot
   checks: read # read statusCheckRollup
 
@@ -106,10 +123,29 @@ jobs:
           producer_release: ${{ inputs.producer_release }}
           base_branch: ${{ inputs.base_branch }}
           app_client_id: ${{ inputs.app_client_id }}
+          runner: ${{ inputs.runner }}
           config: ${{ inputs.config }}
           private_index: ${{ inputs.private_index }}
           app_private_key: ${{ secrets.app_private_key }}
           index_role_arn: ${{ secrets.index_role_arn }}
+
+      # The stall issue's label lives in the consumer's pins.toml, but a failure
+      # BEFORE the composite's checkout (validate, missing App secrets, token
+      # mint) leaves pins.toml absent on the runner. Do an independent sparse
+      # checkout of just the config path so the stall path can read the label
+      # even then. If this checkout itself fails, or the file is absent/malformed,
+      # bump_flow falls back to the stall_label input and records the config error
+      # in the issue body (never a silent default).
+      - name: Check out the pins config for the stall issue
+        id: stall_checkout
+        if: ${{ failure() || cancelled() }}
+        continue-on-error: true
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.base_branch }}
+          sparse-checkout: ${{ inputs.config }}
+          sparse-checkout-cone-mode: false
+          path: __bump_stall_cfg
 
       # No silent stall: every un-merged path (App secrets missing, CI red,
       # conflict-exhausted, timeout, PR closed, any step failure) lands here.
@@ -124,7 +160,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PKG: ${{ inputs.package }}
           VER: ${{ inputs.version }}
-          CONFIG: ${{ inputs.config }}
+          CONFIG: __bump_stall_cfg/${{ inputs.config }}
+          STALL_LABEL: ${{ inputs.stall_label }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           JOB_STATUS: ${{ job.status }}
         run: |
@@ -147,4 +184,5 @@ jobs:
           fi
           python3 "$BUMP_SCRIPTS/bump_flow.py" stall \
             --repo "$GITHUB_REPOSITORY" --package "$PKG" --version "$VER" \
-            --reason "$REASON" --pr "${PR_URL:--}" --run "$RUN_URL" --config "$CONFIG"
+            --reason "$REASON" --pr "${PR_URL:--}" --run "$RUN_URL" \
+            --config "$CONFIG" --stall-label "$STALL_LABEL"

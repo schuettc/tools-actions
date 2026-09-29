@@ -1,0 +1,40 @@
+# FIXTURE — the pre-fix C1 shape that shipped, captured so the guard test always
+# runs (never a skipped `git show <sha>` that silently no-ops in CI). A composite
+# has no job-level env:, so BASE_BRANCH must be redistributed onto each step's
+# env: that reads it. Here it is DROPPED from the bump step's env: exactly as it
+# was in the regression — every `${BASE_BRANCH}` read then aborts the step with
+# `unbound variable` under `set -u`. The guard must name BASE_BRANCH.
+name: Pin bump (pre-fix C1 fixture)
+description: The dropped-BASE_BRANCH shape the step-variable guard exists to catch.
+inputs:
+  package:
+    required: true
+  version:
+    required: true
+  base_branch:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Validate version + package
+      id: validate
+      shell: bash
+      env:
+        RAW_PACKAGE: ${{ inputs.package }}
+        RAW_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        echo "PACKAGE=$RAW_PACKAGE" >> "$GITHUB_ENV"
+        echo "VERSION=$RAW_VERSION" >> "$GITHUB_ENV"
+
+    - name: Bump + relock, open PR, auto-merge, await outcome
+      id: bump
+      shell: bash
+      # BASE_BRANCH is deliberately NOT in env: — this is the shipped regression.
+      env:
+        CONFIG: ci/bump/pins.toml
+      run: |
+        set -euo pipefail
+        BRANCH="chore/bump-${PACKAGE}-${VERSION}"
+        git fetch origin "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
+        git switch -C "$BRANCH" "origin/${BASE_BRANCH}"

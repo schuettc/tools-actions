@@ -62,8 +62,11 @@ OUTCOME_EXIT: dict[str, int] = {
     "timeout": EXIT_UNMERGED,
 }
 
-#: The required-check workflow whose failure decides `await` returns `failed`.
-#: `bump-*.yml` gates the merge on `CI`; a non-required run going red (e.g. an
+#: The DEFAULT required-check name, used ONLY when no ``--config`` is supplied
+#: (the offline tests). At runtime the workflow always passes ``--config`` and the
+#: name is a project answer (``required_check`` in pins.toml): a consumer whose
+#: merge gate is not named ``CI`` would otherwise stall on a 20-minute "timeout"
+#: instead of reading its own red check. A non-required run going red (e.g. an
 #: advisory review workflow, which reports `skipped` on bot PRs) must NOT be read
 #: as a failure, or every bump would stall on an advisory check.
 REQUIRED_CHECK = "CI"
@@ -135,6 +138,33 @@ def _gh_json(args: list[str]) -> Any:
     return json.loads(_run(args))
 
 
+def _required_check(config: Path | None) -> str:
+    """The required-check name — read from ``pins.toml`` (``--config``).
+
+    Mirrors :func:`_stall_label`: the built-in :data:`REQUIRED_CHECK` default
+    applies ONLY when no ``--config`` is supplied (the offline tests). When a
+    config IS supplied the ``required_check`` key must be present, a string, and
+    non-empty — a missing/empty/mistyped value is a loud :class:`ConfigError`, so
+    a consumer never silently inherits a gate name (`CI`) it does not use.
+    """
+    if config is None:
+        return REQUIRED_CHECK
+    data = tomllib.loads(config.read_text())
+    if "required_check" not in data:
+        raise ConfigError(f"{config}: missing required key 'required_check'")
+    value = data["required_check"]
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"{config}: 'required_check' must be a string, got {type(value).__name__}"
+        )
+    if not value:
+        raise ConfigError(
+            f"{config}: 'required_check' is empty — set a non-empty check name "
+            "(no silent fallback to the built-in default)."
+        )
+    return value
+
+
 def _stall_label(config: Path | None) -> str:
     """The stall-issue label — read from ``pins.toml`` (``--config``).
 
@@ -165,6 +195,40 @@ def _stall_label(config: Path | None) -> str:
             "(no silent fallback to the built-in default)."
         )
     return label
+
+
+def _stall_label_resilient(config: Path | None, fallback: str | None) -> tuple[str, str | None]:
+    """The stall-issue label for the STALL path, which MUST always open an issue.
+
+    The stall step can run before the consumer checkout (a validate / App-secret /
+    token-mint failure) or against a missing or malformed ``pins.toml``. In those
+    cases the strict :func:`_stall_label` would raise an uncaught error and NO
+    issue would be filed — the exact silent-stall this whole path exists to
+    prevent. So the stall path degrades: if the config is unreadable (absent,
+    unreadable, or malformed TOML) and a ``fallback`` label is supplied (the
+    ``stall_label`` workflow input), the issue is filed under the fallback and the
+    config error is returned to be recorded IN THE BODY — never a silent default.
+
+    Returns ``(label, config_note_or_None)``. With no ``fallback`` supplied this is
+    the strict :func:`_stall_label` (it raises), so the offline callers are
+    unchanged.
+    """
+    if fallback is None:
+        return _stall_label(config), None
+    if config is None:
+        return fallback, None
+    try:
+        text = config.read_text()
+    except OSError as exc:
+        return fallback, f"pins config unreadable ({config}): {exc}"
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        return fallback, f"pins config malformed TOML ({config}): {exc}"
+    try:
+        return _stall_label(config), None
+    except ConfigError as exc:
+        return fallback, str(exc)
 
 
 #: Injected in tests. The clock is `monotonic` (immune to wall-clock jumps) and
@@ -235,22 +299,22 @@ def _supersede(repo: str, package: str, version: str) -> int:
 # --- await -------------------------------------------------------------------
 
 
-def _failed_required_runs(repo: str, sha: str) -> list[str]:
+def _failed_required_runs(repo: str, sha: str, required_check: str) -> list[str]:
     """Names of required-check workflow runs at ``sha`` whose conclusion failed.
 
     Reads CI with the workflow token (`actions: read`); the App token cannot see
-    the check rollup (F-0812t-coord). Only :data:`REQUIRED_CHECK` runs count, so
+    the check rollup (F-0812t-coord). Only ``required_check`` runs count, so
     an advisory workflow's failure never stalls a bump.
     """
     data = _gh_json(["gh", "api", f"repos/{repo}/actions/runs?head_sha={sha}"])
     return [
         run["name"]
         for run in data["workflow_runs"]
-        if run["name"] == REQUIRED_CHECK and run["conclusion"] == "failure"
+        if run["name"] == required_check and run["conclusion"] == "failure"
     ]
 
 
-def _poll_once(repo: str, pr_url: str) -> tuple[str, str] | None:
+def _poll_once(repo: str, pr_url: str, required_check: str) -> tuple[str, str] | None:
     """One read of the PR. Returns ``(outcome, detail)`` or ``None`` if pending."""
     data = _gh_json(["gh", "pr", "view", pr_url, "--json", "state,mergeStateStatus,headRefOid"])
     state = data["state"]
@@ -263,18 +327,20 @@ def _poll_once(repo: str, pr_url: str) -> tuple[str, str] | None:
     if merge_status in {"DIRTY", "BEHIND"}:
         return "conflict", f"mergeStateStatus={merge_status}"
 
-    failed = _failed_required_runs(repo, data["headRefOid"])
+    failed = _failed_required_runs(repo, data["headRefOid"], required_check)
     if failed:
         return "failed", f"required check failed: {', '.join(failed)}"
 
     return None
 
 
-def _await_pr(repo: str, pr_url: str, timeout_min: int, poll_sec: int) -> tuple[str, str]:
+def _await_pr(
+    repo: str, pr_url: str, timeout_min: int, poll_sec: int, required_check: str
+) -> tuple[str, str]:
     """Poll ``pr_url`` until an outcome or the timeout. Returns ``(outcome, detail)``."""
     deadline = _now() + timeout_min * 60
     while True:
-        result = _poll_once(repo, pr_url)
+        result = _poll_once(repo, pr_url, required_check)
         if result is not None:
             return result
         if _now() >= deadline:
@@ -324,19 +390,24 @@ def _guidance(reason: str) -> str:
     return DEFAULT_GUIDANCE
 
 
-def _stall_body(package: str, version: str, reason: str, pr: str, run: str) -> str:
+def _stall_body(
+    package: str, version: str, reason: str, pr: str, run: str, config_note: str | None = None
+) -> str:
     pr_line = pr if pr != "-" else "(no PR was opened)"
-    return "\n".join(
-        [
-            f"- **Package:** {package}",
-            f"- **Version:** {version}",
-            f"- **Reason:** {reason}",
-            f"- **PR:** {pr_line}",
-            f"- **CI run:** {run}",
-            "",
-            f"**What to do:** {_guidance(reason)}",
-        ]
-    )
+    lines = [
+        f"- **Package:** {package}",
+        f"- **Version:** {version}",
+        f"- **Reason:** {reason}",
+        f"- **PR:** {pr_line}",
+        f"- **CI run:** {run}",
+    ]
+    if config_note:
+        # The stall label came from the workflow fallback, not pins.toml, because
+        # the config was unreadable — record why so the misconfiguration is fixed
+        # rather than the fallback label quietly masking it.
+        lines.append(f"- **Config error:** {config_note}")
+    lines += ["", f"**What to do:** {_guidance(reason)}"]
+    return "\n".join(lines)
 
 
 def _ensure_label(repo: str, label: str) -> None:
@@ -358,11 +429,18 @@ def _ensure_label(repo: str, label: str) -> None:
 
 
 def _stall(
-    repo: str, package: str, version: str, reason: str, pr: str, run: str, label: str
+    repo: str,
+    package: str,
+    version: str,
+    reason: str,
+    pr: str,
+    run: str,
+    label: str,
+    config_note: str | None = None,
 ) -> int:
     """Open a stall issue for ``package``, or comment if one is open."""
     _ensure_label(repo, label)
-    body = _stall_body(package, version, reason, pr, run)
+    body = _stall_body(package, version, reason, pr, run, config_note)
     number = _open_stall_issue(repo, package, label)
     if number is not None:
         _run(["gh", "issue", "comment", str(number), "--repo", repo, "--body", body])
@@ -430,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
     p_await.add_argument("--pr", required=True, help="PR URL")
     p_await.add_argument("--timeout-min", type=int, required=True)
     p_await.add_argument("--poll-sec", type=int, required=True)
+    p_await.add_argument("--config", type=Path, help="pins.toml (for the required-check name)")
 
     p_stall = sub.add_parser("stall", help="open or update the stall issue")
     _add_common(p_stall)
@@ -438,6 +517,14 @@ def main(argv: list[str] | None = None) -> int:
     p_stall.add_argument("--pr", required=True, help="PR URL, or - if none")
     p_stall.add_argument("--run", required=True, help="CI run URL")
     p_stall.add_argument("--config", type=Path, help="pins.toml (for the stall label)")
+    p_stall.add_argument(
+        "--stall-label",
+        help=(
+            "fallback label used ONLY when --config is unreadable (a pre-checkout "
+            "failure or a missing/malformed pins.toml), so a stall issue is filed "
+            "even then — never a silent default"
+        ),
+    )
 
     p_resolve = sub.add_parser("resolve", help="close the stall issue on merge")
     _add_common(p_resolve)
@@ -451,13 +538,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "supersede":
             return _supersede(args.repo, args.package, args.version)
         if args.command == "await":
-            outcome, detail = _await_pr(args.repo, args.pr, args.timeout_min, args.poll_sec)
+            required_check = _required_check(args.config)
+            outcome, detail = _await_pr(
+                args.repo, args.pr, args.timeout_min, args.poll_sec, required_check
+            )
             print(f"outcome={outcome} detail={detail}")
             return OUTCOME_EXIT[outcome]
         if args.command == "stall":
-            label = _stall_label(args.config)
+            label, config_note = _stall_label_resilient(args.config, args.stall_label)
             return _stall(
-                args.repo, args.package, args.version, args.reason, args.pr, args.run, label
+                args.repo,
+                args.package,
+                args.version,
+                args.reason,
+                args.pr,
+                args.run,
+                label,
+                config_note,
             )
         if args.command == "resolve":
             label = _stall_label(args.config)

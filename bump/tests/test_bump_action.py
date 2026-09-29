@@ -34,11 +34,48 @@ ACTION_YML = ACTION_DIR / "action.yml"
 REUSABLE = REPO_ROOT / ".github" / "workflows" / "bump-pin.yml"
 README = ACTION_DIR / "README.md"
 IMAGES_YML = REPO_ROOT / "images" / "action.yml"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 # The reusable step-variable guard lives beside this test so other actions can
 # adopt it; import it straight from there.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from stepvars import _env_writes, undefined_run_vars  # noqa: E402
+
+# bump_pin.py lives beside the action; import the loaders so the README's toml
+# examples are validated against the REAL config parser (I3).
+sys.path.insert(0, str(ACTION_DIR))
+from bump_pin import load_config, load_stage_globs  # noqa: E402
+
+# Permission levels, weakest to strongest, for the C1 coverage assertion.
+_PERM_RANK = {"none": 0, "read": 1, "write": 2}
+
+
+def _fenced_blocks(md_text: str, lang: str) -> list[str]:
+    """Every fenced ```<lang> block body in ``md_text`` (in document order)."""
+    blocks: list[str] = []
+    lines = md_text.splitlines()
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == f"```{lang}":
+            j = i + 1
+            body: list[str] = []
+            while j < len(lines) and lines[j].strip() != "```":
+                body.append(lines[j])
+                j += 1
+            blocks.append("\n".join(body))
+            i = j + 1
+        else:
+            i += 1
+    return blocks
+
+
+def _readme_caller_block() -> str:
+    """The one fenced yaml block in the README that is a full reusable-workflow
+    caller (has on:, jobs:, and calls bump-pin.yml)."""
+    for block in _fenced_blocks(README.read_text(), "yaml"):
+        if "jobs:" in block and "on:" in block and "bump-pin.yml" in block:
+            return block
+    raise AssertionError("no reusable-workflow caller block found in the README")
 
 _VERSION_PIN = re.compile(r"@v\d+\.\d+\.\d+$")
 
@@ -50,6 +87,7 @@ EXPECTED_INPUTS: dict[str, object] = {
     "check_consumer": None,
     "producer_release": None,
     "base_branch": None,
+    "runner": None,
     "app_client_id": None,
     "config": "ci/bump/pins.toml",
     "private_index": "",
@@ -164,7 +202,9 @@ def test_reusable_workflow_call_surface() -> None:
         "config",
         "private_index",
         "runner",
+        "stall_label",
     }
+    assert call["inputs"]["stall_label"]["required"] is True
     secrets = call["secrets"]
     assert set(secrets) == {"app_private_key", "index_role_arn"}
     assert secrets["app_private_key"]["required"] is True
@@ -182,11 +222,10 @@ def test_reusable_workflow_stalls_on_failure_and_cancellation() -> None:
     not run on a job-timeout cancellation) and fires on both conditions."""
     doc = yaml.safe_load(REUSABLE.read_text())
     steps = doc["jobs"]["bump"]["steps"]
-    stall = [s for s in steps if "stall" in (s.get("name", "").lower())]
-    assert stall, "expected a stall step"
+    stall = [s for s in steps if "run" in s and "bump_flow.py" in s["run"] and "stall" in s["run"]]
+    assert stall, "expected a stall run step"
     cond = stall[0]["if"]
     assert "failure()" in cond and "cancelled()" in cond
-    assert "bump_flow.py" in stall[0]["run"] and "stall" in stall[0]["run"]
 
 
 def test_reusable_workflow_pins_the_bump_composite_to_version() -> None:
@@ -282,20 +321,13 @@ def _composite(tmp_path: Path, *steps: dict) -> Path:
     return p
 
 
-def test_pre_fix_c1_shape_flags_base_branch(tmp_path: Path) -> None:
-    """The exact shape that shipped: ``git show 2463203:bump/action.yml`` (the
-    commit BEFORE BASE_BRANCH was redistributed onto the step ``env:`` blocks)
-    must still be caught \u2014 the guard names BASE_BRANCH as an undefined read."""
-    raw = subprocess.run(
-        ["git", "show", "2463203:bump/action.yml"],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-    )
-    if raw.returncode != 0:
-        pytest.skip("commit 2463203 not reachable in this checkout")
-    fixture = tmp_path / "c1-action.yml"
-    fixture.write_text(raw.stdout)
+def test_pre_fix_c1_shape_flags_base_branch() -> None:
+    """The pre-fix C1 shape, captured as a FIXTURE FILE (not a ``git show <sha>``
+    that skips when the commit is not in the checkout, so this always runs in CI):
+    BASE_BRANCH is dropped from the bump step's ``env:`` and the guard must name it
+    as an undefined read \u2014 the exact regression that shipped."""
+    fixture = FIXTURES / "pre_fix_base_branch_action.yml"
+    assert fixture.exists(), f"missing fixture {fixture}"
     flagged = {name for _step, name in undefined_run_vars(fixture)}
     assert "BASE_BRANCH" in flagged, (
         f"guard must catch the pre-fix C1 BASE_BRANCH shape: {flagged}"
@@ -402,71 +434,367 @@ def _actionlint() -> list[str]:
     )
 
 
-def test_actionlint_on_reusable_and_a_caller(tmp_path: Path) -> None:
-    runner = _actionlint()
-
-    # A tiny repo with the reusable workflow and a caller that USES it via a local
-    # path, so actionlint resolves the reusable and checks the `with:`/`secrets:`
-    # against its declared workflow_call surface.
+def _actionlint_repo(tmp_path: Path) -> tuple[Path, Path]:
+    """A tiny repo carrying the reusable workflow at a local path, so a caller can
+    `uses: ./.github/workflows/bump-pin.yml` and actionlint resolves it. Returns
+    ``(repo, actionlint_config_file)``."""
     repo = tmp_path / "repo"
     workflows = repo / ".github" / "workflows"
     workflows.mkdir(parents=True)
     shutil.copy(REUSABLE, workflows / "bump-pin.yml")
-
-    # actionlint only knows hosted-runner labels up to its release; declare
-    # ubuntu-26.04 so a pinned image is not read as an unknown label.
     config_file = repo / ".github" / "actionlint.yaml"
     config_file.write_text("self-hosted-runner:\n  labels:\n    - ubuntu-26.04\n")
+    return repo, config_file
 
-    caller = workflows / "bump-lib.yml"
-    caller.write_text(
-        "\n".join(
-            [
-                "name: Bump lib",
-                "on:",
-                "  repository_dispatch:",
-                '    types: ["lib-published"]',
-                "  workflow_dispatch:",
-                "    inputs:",
-                "      package:",
-                "        required: true",
-                "        type: string",
-                "      version:",
-                "        required: true",
-                "        type: string",
-                "jobs:",
-                "  bump:",
-                "    uses: ./.github/workflows/bump-pin.yml",
-                "    with:",
-                "      package: ${{ github.event_name == 'workflow_dispatch' "
-                "&& inputs.package || github.event.client_payload.package }}",
-                "      version: ${{ github.event_name == 'workflow_dispatch' "
-                "&& inputs.version || github.event.client_payload.version }}",
-                "      check_consumer: false",
-                '      producer_release: "lib release"',
-                "      base_branch: main",
-                "      app_client_id: ${{ vars.RELEASE_APP_CLIENT_ID }}",
-                "      runner: ubuntu-26.04",
-                '      private_index: ""',
-                "    secrets:",
-                "      app_private_key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}",
-                "",
-            ]
-        )
-    )
 
-    result = subprocess.run(
+def _run_actionlint(repo: Path, config_file: Path, *targets: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
         [
-            *runner,
+            *_actionlint(),
             "-config-file",
             str(config_file),
             "-ignore",
             r'label ".+" is unknown',
-            str(caller),
-            str(workflows / "bump-pin.yml"),
+            *[str(t) for t in targets],
         ],
         cwd=repo,
         capture_output=True,
         text=True,
     )
+
+
+def test_actionlint_on_reusable_and_the_readme_caller(tmp_path: Path) -> None:
+    """I3: the caller actionlinted here is the ONE lifted verbatim from the README
+    (the remote `uses:` rewritten to the local path), not a hand-written stand-in.
+    That is the gap C1 slipped through \u2014 the documented caller is now the tested
+    caller, so a missing permissions block (or a bad with:/secrets:) fails CI."""
+    repo, config_file = _actionlint_repo(tmp_path)
+    caller_src = _readme_caller_block().replace(
+        "schuettc/tools-actions/.github/workflows/bump-pin.yml@v" + _version(),
+        "./.github/workflows/bump-pin.yml",
+    )
+    caller = repo / ".github" / "workflows" / "bump-lib.yml"
+    caller.write_text(caller_src + "\n")
+    result = _run_actionlint(repo, config_file, caller, repo / ".github" / "workflows" / "bump-pin.yml")
     assert result.returncode == 0, f"actionlint failed:\n{result.stdout}\n{result.stderr}"
+
+
+# --- C1: the README caller's permissions cover the reusable workflow ---------
+
+
+def test_readme_caller_permissions_cover_the_reusable() -> None:
+    """A called reusable workflow can only NARROW the caller's token. The README
+    caller must grant every permission key the reusable declares, at no weaker
+    level, or every consumer copying it hits a startup failure (no job, no stall
+    issue) \u2014 the C1 that shipped."""
+    reusable = yaml.safe_load(REUSABLE.read_text())
+    reusable_perms = reusable["permissions"]
+    assert isinstance(reusable_perms, dict) and reusable_perms, "reusable must declare permissions"
+
+    caller = yaml.safe_load(_readme_caller_block())
+    job = caller["jobs"]["bump"]
+    caller_perms = job.get("permissions") or caller.get("permissions") or {}
+    assert caller_perms, "README caller has NO permissions block (C1 startup failure)"
+
+    for key, level in reusable_perms.items():
+        have = caller_perms.get(key, "none")
+        assert _PERM_RANK[have] >= _PERM_RANK[level], (
+            f"README caller grants {key}:{have}, weaker than the reusable's {key}:{level}"
+        )
+
+
+# --- I3: the README toml examples load through the REAL config parser ---------
+
+
+def test_readme_toml_blocks_load_through_the_real_loaders(tmp_path: Path) -> None:
+    """Every ```toml pins.toml example in the README parses cleanly through
+    load_config AND load_stage_globs \u2014 a documented config that the shipped parser
+    rejects is a lie the tests must catch (I3)."""
+    blocks = [b for b in _fenced_blocks(README.read_text(), "toml") if "[[package]]" in b]
+    assert blocks, "expected at least one pins.toml example in the README"
+    for idx, block in enumerate(blocks):
+        cfg = tmp_path / f"pins-{idx}.toml"
+        cfg.write_text(block + "\n")
+        packages = load_config(cfg)
+        assert packages, f"README toml block #{idx} declared no packages"
+        load_stage_globs(cfg)  # must not raise
+
+
+# --- I2: a -latest runner / empty required input fails into the stall path ----
+
+
+def _reject_step_script() -> str:
+    doc = yaml.safe_load(ACTION_YML.read_text())
+    for step in doc["runs"]["steps"]:
+        if step.get("id") == "reject_inputs":
+            return step["run"]
+    raise AssertionError("no reject_inputs step in the composite action")
+
+
+def test_reject_step_exists_and_is_first_validation() -> None:
+    doc = yaml.safe_load(ACTION_YML.read_text())
+    steps = doc["runs"]["steps"]
+    ids = [s.get("id") for s in steps]
+    assert "reject_inputs" in ids, "composite must reject *-latest / empty inputs"
+    # It runs right after `expose` (which set BUMP_SCRIPTS so the job-level stall
+    # step can still open an issue when this validation fails).
+    assert ids.index("reject_inputs") == ids.index("expose") + 1
+
+
+def _run_reject(runner: str, base_branch: str) -> subprocess.CompletedProcess:
+    # The reject step reads RUNNER_LABEL/BASE_BRANCH from env; feed the real step
+    # body to bash with those set, exactly as the composite runs it.
+    body = _reject_step_script()
+    return subprocess.run(
+        ["bash", "-c", f"RUNNER_LABEL={runner!r} BASE_BRANCH={base_branch!r} bash -s"],
+        input=body,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_reject_step_accepts_an_exact_runner() -> None:
+    assert _run_reject("ubuntu-26.04", "dev").returncode == 0
+
+
+def test_reject_step_fails_on_a_latest_runner() -> None:
+    r = _run_reject("ubuntu-latest", "dev")
+    assert r.returncode != 0
+    assert "-latest" in (r.stdout + r.stderr)
+
+
+def test_reject_step_fails_on_an_empty_runner() -> None:
+    r = _run_reject("", "dev")
+    assert r.returncode != 0
+    assert "runner is empty" in (r.stdout + r.stderr)
+
+
+def test_reject_step_fails_on_an_empty_base_branch() -> None:
+    r = _run_reject("ubuntu-26.04", "")
+    assert r.returncode != 0
+    assert "base_branch is empty" in (r.stdout + r.stderr)
+
+
+def test_reusable_passes_runner_to_the_composite() -> None:
+    doc = yaml.safe_load(REUSABLE.read_text())
+    step = doc["jobs"]["bump"]["steps"][0]
+    assert step["with"]["runner"] == "${{ inputs.runner }}"
+
+
+# --- I1: the stall step is resilient to a failure before checkout ------------
+
+
+def test_stall_step_sparse_checks_out_the_config_and_passes_a_fallback_label() -> None:
+    doc = yaml.safe_load(REUSABLE.read_text())
+    steps = doc["jobs"]["bump"]["steps"]
+    # A dedicated sparse checkout of the config precedes the stall run step, so a
+    # failure BEFORE the composite's own checkout can still read pins.toml.
+    checkout = [s for s in steps if s.get("id") == "stall_checkout"]
+    assert checkout, "expected a stall_checkout step"
+    assert "actions/checkout" in checkout[0]["uses"]
+    assert checkout[0]["with"]["sparse-checkout"] == "${{ inputs.config }}"
+    assert "failure()" in checkout[0]["if"] and "cancelled()" in checkout[0]["if"]
+
+    stall = [s for s in steps if "run" in s and "bump_flow.py" in s["run"] and "stall" in s["run"]]
+    assert stall, "expected a stall run step"
+    run = stall[0]["run"]
+    assert "--stall-label" in run, "stall step must pass a fallback label"
+    # Its config points at the sparse-checkout path, not the bare consumer path.
+    assert stall[0]["env"]["CONFIG"].startswith("__bump_stall_cfg/")
+
+
+# --- M2: GITHUB_TOKEN permissions are minimal --------------------------------
+
+
+def test_reusable_permissions_are_minimal() -> None:
+    """Writes go through the App token, so GITHUB_TOKEN needs only issues:write
+    and id-token:write; everything else is read (M2)."""
+    doc = yaml.safe_load(REUSABLE.read_text())
+    perms = doc["permissions"]
+    assert perms["issues"] == "write"
+    assert perms["id-token"] == "write"
+    assert perms["contents"] == "read"
+    assert perms["pull-requests"] == "read"
+    assert perms["actions"] == "read"
+    assert perms["checks"] == "read"
+
+
+# --- M6: shellcheck the run scripts inside the composite + reusable -----------
+
+
+def _bash_run_scripts(path: Path) -> list[tuple[str, str]]:
+    doc = yaml.safe_load(path.read_text())
+    runs = doc.get("runs")
+    if isinstance(runs, dict) and "steps" in runs:
+        steps = runs["steps"]
+    else:
+        steps = [s for job in (doc.get("jobs") or {}).values() for s in job.get("steps") or []]
+    out: list[tuple[str, str]] = []
+    for s in steps:
+        if isinstance(s, dict) and "run" in s and s.get("shell", "bash") == "bash":
+            out.append((s.get("name", "<unnamed>"), s["run"]))
+    return out
+
+
+def _shellcheck() -> list[str]:
+    binary = shutil.which("shellcheck")
+    if binary:
+        return [binary]
+    pytest.fail(
+        "shellcheck is not on PATH: a test that lints shell must run, not skip. "
+        "Install the pinned shellcheck (see the 'bump' CI job) before running this suite."
+    )
+
+
+def test_composite_and_reusable_run_scripts_are_shellcheck_clean(tmp_path: Path) -> None:
+    runner = _shellcheck()
+    gha = re.compile(r"\$\{\{.*?\}\}", re.DOTALL)
+    failures: list[str] = []
+    for path in (ACTION_YML, REUSABLE):
+        for name, body in _bash_run_scripts(path):
+            # Neutralise GitHub `${{ ... }}` expressions (not shell) to a token so
+            # shellcheck sees valid bash.
+            script = "#!/usr/bin/env bash\n" + gha.sub("GHA_EXPR", body)
+            f = tmp_path / "s.sh"
+            f.write_text(script)
+            result = subprocess.run([*runner, str(f)], capture_output=True, text=True)
+            if result.returncode != 0:
+                failures.append(f"{path.name} :: {name}\n{result.stdout}")
+    assert not failures, "shellcheck findings in run scripts:\n" + "\n".join(failures)
+
+
+# --- I4: the step-variable guard's new powers --------------------------------
+
+
+def test_guard_scans_env_context_in_run_if_and_with(tmp_path: Path) -> None:
+    """`${{ env.X }}` in run:, if: and with: must resolve to a defined env name.
+    An undefined env.X silently becomes '' at runtime \u2014 a finding here."""
+    producer = {
+        "name": "writes DEFINED to GITHUB_ENV",
+        "shell": "bash",
+        "run": 'set -euo pipefail\necho "DEFINED=1" >> "$GITHUB_ENV"\n',
+    }
+    reads_if = {
+        "name": "reads env in if",
+        "if": "${{ env.DEFINED == '1' && env.UNDEFINED_A != 'x' }}",
+        "shell": "bash",
+        "run": "set -euo pipefail\ntrue\n",
+    }
+    reads_with = {
+        "name": "reads env in with",
+        "uses": "some/action@v1",
+        "with": {"region": "${{ env.UNDEFINED_B }}", "ok": "${{ env.DEFINED }}"},
+    }
+    reads_run = {
+        "name": "reads env in run expr",
+        "shell": "bash",
+        "run": "set -euo pipefail\necho '${{ env.UNDEFINED_C }}'\n",
+    }
+    flagged = {
+        ref for _s, ref in undefined_run_vars(
+            _composite(tmp_path, producer, reads_if, reads_with, reads_run)
+        )
+    }
+    assert flagged == {"env.UNDEFINED_A", "env.UNDEFINED_B", "env.UNDEFINED_C"}, flagged
+
+
+def test_guard_conditional_github_env_write_does_not_satisfy_a_bare_read(tmp_path: Path) -> None:
+    """A $GITHUB_ENV write inside an if is conditional: a later BARE $X can be
+    unbound under set -u, so it is a finding \u2014 unless the reader guards ${X:-}.
+    (The same conditional write DOES satisfy an env.X read.)"""
+    producer = {
+        "name": "conditional write",
+        "shell": "bash",
+        "run": (
+            "set -euo pipefail\n"
+            'if [ -n "${MAYBE:-}" ]; then\n'
+            '  echo "COND=1" >> "$GITHUB_ENV"\n'
+            "fi\n"
+        ),
+    }
+    bare_reader = {
+        "name": "bare read of a conditional write",
+        "shell": "bash",
+        "run": 'set -euo pipefail\necho "$COND"\n',
+    }
+    guarded_reader = {
+        "name": "guarded read of a conditional write",
+        "shell": "bash",
+        "run": 'set -euo pipefail\necho "${COND:-}"\n',
+    }
+    env_reader = {
+        "name": "env.X read of a conditional write",
+        "if": "${{ env.COND == '1' }}",
+        "shell": "bash",
+        "run": "set -euo pipefail\ntrue\n",
+    }
+    flagged = [
+        (s, v)
+        for s, v in undefined_run_vars(
+            _composite(tmp_path, producer, bare_reader, guarded_reader, env_reader)
+        )
+    ]
+    names = {v for _s, v in flagged}
+    assert "COND" in names, f"bare read of a conditional write must be flagged: {flagged}"
+    # The guarded read and the env.X read are NOT findings.
+    assert not any(s == "guarded read of a conditional write" for s, _v in flagged)
+    assert "env.COND" not in names
+
+
+def test_guard_is_order_aware_read_before_assignment(tmp_path: Path) -> None:
+    """A read before its assignment is a finding; the reverse order is clean."""
+    before = {
+        "name": "read before assign",
+        "shell": "bash",
+        "run": 'set -euo pipefail\necho "$X"\nX=1\n',
+    }
+    assert {v for _s, v in undefined_run_vars(_composite(tmp_path, before))} == {"X"}
+
+    after = {
+        "name": "assign before read",
+        "shell": "bash",
+        "run": 'set -euo pipefail\nX=1\necho "$X"\n',
+    }
+    assert undefined_run_vars(_composite(tmp_path, after)) == []
+
+
+def test_guard_inline_prefix_defines_only_for_that_command(tmp_path: Path) -> None:
+    """`X=1 cmd` defines X for that one command only; a later bare $X is a finding.
+    `echo X=1` is NOT an assignment."""
+    inline = {
+        "name": "inline prefix then bare",
+        "shell": "bash",
+        "run": 'set -euo pipefail\nX=1 env >/dev/null\necho "$X"\n',
+    }
+    assert {v for _s, v in undefined_run_vars(_composite(tmp_path, inline))} == {"X"}
+
+    echo_not_assign = {
+        "name": "echo is not an assignment",
+        "shell": "bash",
+        "run": 'set -euo pipefail\necho X=1\necho "$X"\n',
+    }
+    assert {v for _s, v in undefined_run_vars(_composite(tmp_path, echo_not_assign))} == {"X"}
+
+
+def test_guard_handles_length_and_indirect_expansions(tmp_path: Path) -> None:
+    """`${#VAR}` and `${!VAR}` both READ VAR and both abort under set -u if unset."""
+    step = {
+        "name": "length and indirect",
+        "shell": "bash",
+        "run": 'set -euo pipefail\necho "${#LEN} ${!IND}"\n',
+    }
+    assert {v for _s, v in undefined_run_vars(_composite(tmp_path, step))} == {"LEN", "IND"}
+
+    defined = dict(step, env={"LEN": "x", "IND": "y"})
+    assert undefined_run_vars(_composite(tmp_path, defined)) == []
+
+
+def test_guard_value_with_subshell_is_a_persistent_assignment(tmp_path: Path) -> None:
+    """`X=$(cmd a b)` is ONE assignment (spaces inside `$(...)` don't split it),
+    so a later bare $X is satisfied \u2014 not mis-read as an inline prefix."""
+    step = {
+        "name": "subshell value",
+        "shell": "bash",
+        "run": 'set -euo pipefail\nX=$(printf "%s" hi)\necho "$X"\n',
+    }
+    assert undefined_run_vars(_composite(tmp_path, step)) == []
