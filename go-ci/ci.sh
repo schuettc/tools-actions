@@ -64,11 +64,16 @@ end
 
 step "cross-build"
 out="$(mktemp -d)"; trap 'rm -rf "$out"' EXIT
+# -o <dir>/ builds every main package into a scratch dir (never the tree), but
+# refuses a package set with no main package ("no main packages to build"). A
+# library is built without -o instead, which compiles every package and writes
+# nothing, so it is cross-built all the same.
+# shellcheck disable=SC2086
+if [ -n "$(go list -f '{{if eq .Name "main"}}main{{end}}' $pkgs)" ]; then outflag=(-o "$out/"); else outflag=(); fi
 for target in ${TARGETS:-darwin/arm64 darwin/amd64 linux/amd64 linux/arm64}; do
   echo "build $target"
-  # -o <dir>/ builds every main package into a scratch dir (never the tree).
   # shellcheck disable=SC2086
-  CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" go build -o "$out/" $pkgs
+  CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" go build ${outflag[@]+"${outflag[@]}"} $pkgs
 done
 end
 echo "go-ci: all checks passed"
