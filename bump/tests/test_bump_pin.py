@@ -126,13 +126,173 @@ def test_absent_package_says_so_distinctly() -> None:
         rewrite_pin('    "lib-c>=1.0,<2.0",\n', "lib-a", "2.19.0")
 
 
-def test_only_the_first_pin_is_rewritten() -> None:
-    """A bump targets one file's one pin; rewriting every occurrence in a file
-    would be a silent widening."""
+def test_every_identical_occurrence_is_rewritten() -> None:
+    """A package pinned twice in one file (mlb-dk's `[project.dependencies]` +
+    `[dependency-groups]` shape) bumps BOTH — leaving the second stale was the
+    bug. Two identical occurrences both move."""
     text = A_RANGE + A_RANGE
-    new, _ = rewrite_pin(text, "lib-a", "2.19.0")
-    assert new.count('"lib-a>=2.19.0,<3.0.0"') == 1
-    assert new.count('"lib-a>=2.17.0,<3.0.0"') == 1
+    new, desc = rewrite_pin(text, "lib-a", "2.19.0")
+    assert new.count('"lib-a>=2.19.0,<3.0.0"') == 2
+    assert '"lib-a>=2.17.0,<3.0.0"' not in new
+    assert "2 occurrences rewritten" in desc
+
+
+# The real mlb-dk shape: the same package pinned once in `[project.dependencies]`
+# and again in a `[dependency-groups]` group, each occurrence keeping its shape.
+MLB_DK_TWO_SHAPES = (
+    "[project]\n"
+    "dependencies = [\n"
+    '    "bh-sport-contract>=0.1.2,<1.0.0",\n'
+    "]\n"
+    "\n"
+    "[dependency-groups]\n"
+    "lambda-base = [\n"
+    '    "bh-sport-contract>=0.1.2,<1.0.0",\n'
+    "]\n"
+)
+
+
+def test_two_occurrences_different_shapes_both_rewrite() -> None:
+    """The mlb-dk case with each occurrence a different shape: a range with a
+    ceiling in `[project.dependencies]` and an exact `==` pin in the group. Each
+    keeps its own derived shape."""
+    text = (
+        "[project]\n"
+        "dependencies = [\n"
+        '    "bh-lake>=0.4.0,<1.0.0",\n'
+        "]\n"
+        "[dependency-groups]\n"
+        "lambda-base = [\n"
+        '    "bh-lake==0.4.0.dev5",\n'
+        "]\n"
+    )
+    new, desc = rewrite_pin(text, "bh-lake", "0.5.0")
+    # Range occurrence: ceiling preserved verbatim.
+    assert '"bh-lake>=0.5.0,<1.0.0"' in new
+    # Exact occurrence: ceiling DERIVED from the version's major.
+    assert '"bh-lake>=0.5.0,<1.0.0"' in new  # derived <1.0.0 for 0.x
+    assert '"bh-lake==0.4.0.dev5"' not in new
+    assert new.count('"bh-lake>=0.5.0') == 2
+    assert "2 occurrences rewritten" in desc
+    assert "ceiling preserved" in desc
+    assert "DERIVED" in desc
+
+
+def test_the_real_mlb_dk_dual_range_shape_bumps_both() -> None:
+    """The exact mlb-dk pyproject shape from the report: identical range pins in
+    `[project.dependencies]` and the `lambda-base` group. Both must move — the
+    lambda-base one silently staying at the stale floor was the reported bug."""
+    new, desc = rewrite_pin(MLB_DK_TWO_SHAPES, "bh-sport-contract", "0.2.0")
+    assert new.count('"bh-sport-contract>=0.2.0,<1.0.0"') == 2
+    assert '"bh-sport-contract>=0.1.2,<1.0.0"' not in new
+    assert "2 occurrences rewritten" in desc
+
+
+def test_one_supported_plus_one_unsupported_occurrence_fails(tmp_path: Any) -> None:
+    """If ANY occurrence matches none of the supported shapes, the whole rewrite
+    fails loudly, naming what it found and the line — the second occurrence must
+    never be silently left stale."""
+    text = (
+        '    "bh-lake>=0.4.0,<1.0.0",\n'
+        '    "bh-lake @ file:///tmp/wheel.whl",\n'
+    )
+    with pytest.raises(PinNotFoundError) as exc:
+        rewrite_pin(text, "bh-lake", "0.5.0")
+    assert "Found instead" in str(exc.value)
+    assert "line 2" in str(exc.value)
+
+
+def test_an_occurrence_inside_a_comment_is_rewritten() -> None:
+    """The matcher is text-level, not a TOML parse — exactly as mlb-dk's old
+    `re.subn`-over-the-whole-file logic was. A pin quoted inside a comment is an
+    occurrence and is rewritten like any other; documenting the behaviour the old
+    code had."""
+    text = (
+        '    "lib-a>=2.17.0,<3.0.0",\n'
+        '    # keep in sync with "lib-a>=2.17.0,<3.0.0" above\n'
+    )
+    new, desc = rewrite_pin(text, "lib-a", "2.19.0")
+    assert new.count('"lib-a>=2.19.0,<3.0.0"') == 2
+    assert "2 occurrences rewritten" in desc
+
+
+def test_unsupported_second_occurrence_via_package_fails_naming_file(tmp_path: Any) -> None:
+    """End-to-end through the file layer: a supported first pin and an unsupported
+    second occurrence in the SAME mapped file fails, naming the file — closing
+    the hole where a second occurrence was silently ignored."""
+    (tmp_path / "packages" / "lib").mkdir(parents=True)
+    (tmp_path / "packages" / "lib" / "pyproject.toml").write_text(
+        '    "lib-b>=0.4.0,<1.0.0",\n    "lib-b @ file:///tmp/wheel.whl",\n'
+    )
+    config = _config({"lib-b": [LIB]})
+    with pytest.raises(PinNotFoundError) as exc:
+        rewrite_pin_for_package("lib-b", "0.5.0", config, root=tmp_path)
+    assert "Found instead" in str(exc.value)
+    assert LIB in str(exc.value)
+
+
+def test_multi_occurrence_description_counts_them() -> None:
+    """The summary names how many occurrences were rewritten — the run log tells a
+    single-pin bump from a dual-pin one without opening the diff."""
+    single, desc_single = rewrite_pin(A_RANGE, "lib-a", "2.19.0")
+    assert "1 occurrence rewritten" in desc_single
+    _, desc_double = rewrite_pin(A_RANGE + A_RANGE, "lib-a", "2.19.0")
+    assert "2 occurrences rewritten" in desc_double
+
+
+def test_an_incidental_non_pin_mention_is_ignored_not_failed() -> None:
+    """A quoted string that merely STARTS with the package name but carries no
+    version operator (a keyword, a description) is not a pin. It must be left
+    untouched, and it must NOT be enrolled as an unrecognized occurrence that
+    hard-fails the bump — the regression this fix closes."""
+    text = (
+        '    keywords = ["bh-lake"]\n'
+        '    description = "bh-lake client"\n'
+        '    "bh-lake>=0.4.0,<1.0.0",\n'
+    )
+    new, desc = rewrite_pin(text, "bh-lake", "0.5.0")
+    assert '"bh-lake>=0.5.0,<1.0.0"' in new
+    assert 'keywords = ["bh-lake"]' in new  # incidental mention untouched
+    assert 'description = "bh-lake client"' in new  # incidental mention untouched
+    assert "1 occurrence rewritten" in desc
+
+
+def test_a_supported_pin_among_incidental_mentions_is_rewritten() -> None:
+    """With incidental non-pin mentions present, the one real pin is still found
+    and rewritten — enrolment keys on the operator, not the bare name."""
+    text = '    authors = ["bh-lake team"]\n    "bh-lake>=0.4.0,<1.0.0",\n'
+    new, _ = rewrite_pin(text, "bh-lake", "0.5.0")
+    assert new == '    authors = ["bh-lake team"]\n    "bh-lake>=0.5.0,<1.0.0",\n'
+
+
+def test_an_unsupported_pin_shape_fails_naming_its_line() -> None:
+    """A pin-SHAPED occurrence (it reaches a version operator) that is not one of
+    the three supported forms must still fail loudly, naming its line — extras,
+    whitespace around the operator and `~=` are real pins we cannot silently
+    skip."""
+    for bad in (
+        '    "bh-lake[extra]>=0.4.0,<1.0.0",\n',  # extras
+        '    "bh-lake >= 0.4.0",\n',  # whitespace around the operator
+        '    "bh-lake~=0.4.0",\n',  # compatible-release operator
+    ):
+        with pytest.raises(PinNotFoundError) as exc:
+            rewrite_pin(bad, "bh-lake", "0.5.0")
+        assert "Found instead" in str(exc.value)
+        assert "line 1" in str(exc.value)
+
+
+def test_rewrite_for_package_writes_both_occurrences_in_one_file(tmp_path: Any) -> None:
+    """The mlb-dk file layout: both occurrences in one mapped file are written and
+    the returned description counts them."""
+    (tmp_path / "packages" / "lib").mkdir(parents=True)
+    target = tmp_path / "packages" / "lib" / "pyproject.toml"
+    target.write_text(MLB_DK_TWO_SHAPES)
+    config = _config({"bh-sport-contract": [LIB]})
+    written = rewrite_pin_for_package("bh-sport-contract", "0.2.0", config, root=tmp_path)
+    assert len(written) == 1
+    _, desc = written[0]
+    assert target.read_text().count('"bh-sport-contract>=0.2.0,<1.0.0"') == 2
+    assert "2 occurrences rewritten" in desc
 
 
 def test_package_name_is_not_a_regex_injection_point() -> None:
@@ -418,7 +578,7 @@ def _staged(root: Path) -> set[str]:
 
 def test_classify_changes_splits_allowed_from_stray() -> None:
     """Pinned files are ALWAYS allowed; the lock and post-lock outputs are allowed
-    only because they are listed in stage_globs \u2014 nothing is hardcoded."""
+    only because they are listed in stage_globs — nothing is hardcoded."""
     allowed, stray = classify_changes(
         [
             "pyproject.toml",
@@ -484,7 +644,7 @@ def test_stage_fails_loudly_on_a_stray_path(tmp_path: Any, capsys: Any) -> None:
 
 def test_stage_stages_pin_lock_and_export_outputs(tmp_path: Any) -> None:
     """Only the pinned file(s) plus stage_globs matches (here uv.lock and the
-    requirements exports) are staged \u2014 exactly what a bump+relock+export touches."""
+    requirements exports) are staged — exactly what a bump+relock+export touches."""
     root = tmp_path / "repo"
     (root / "packages" / "lib").mkdir(parents=True)
     (root / "infra" / "docker").mkdir(parents=True)
@@ -513,7 +673,7 @@ def test_stage_stages_pin_lock_and_export_outputs(tmp_path: Any) -> None:
 
 def test_stage_stages_a_non_uv_lock_file(tmp_path: Any) -> None:
     """A project whose lock_command writes package-lock.json lists it in stage_globs
-    and the stage step commits it \u2014 the code carries no uv assumption."""
+    and the stage step commits it — the code carries no uv assumption."""
     root = tmp_path / "repo"
     (root / "packages" / "lib").mkdir(parents=True)
     (root / "packages" / "lib" / "pyproject.toml").write_text(B_RANGE)
@@ -541,7 +701,7 @@ def test_stage_fails_loudly_naming_a_lock_absent_from_stage_globs(
     (root / "packages" / "lib").mkdir(parents=True)
     (root / "packages" / "lib" / "pyproject.toml").write_text(B_RANGE)
     (root / "uv.lock").write_text("# lock\n")
-    # lock_command is set in config, but stage_globs is EMPTY \u2014 the lock is stray.
+    # lock_command is set in config, but stage_globs is EMPTY — the lock is stray.
     config = _write_config_with_globs(root, {"lib-b": [LIB]}, [])
     _init_repo(root)
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
@@ -569,7 +729,7 @@ def test_stage_fails_loudly_naming_a_lock_absent_from_stage_globs(
 
 
 def test_check_not_a_consumer_emits_no_notice_annotation(tmp_path: Any, capsys: Any) -> None:
-    """An unmapped package pinned nowhere is a graceful skip \u2014 its status must be a
+    """An unmapped package pinned nowhere is a graceful skip — its status must be a
     plain log line, not a `::notice::` the watcher would file as an issue."""
     config = _write_config(tmp_path, {"lib-b": [LIB]})
     assert (
@@ -582,7 +742,7 @@ def test_check_not_a_consumer_emits_no_notice_annotation(tmp_path: Any, capsys: 
 
 
 def test_check_nothing_to_bump_emits_no_notice_annotation(tmp_path: Any, capsys: Any) -> None:
-    """A mapped file present but carrying no pin is a graceful skip \u2014 plain log,
+    """A mapped file present but carrying no pin is a graceful skip — plain log,
     no `::notice::` annotation."""
     (tmp_path / "packages" / "lib").mkdir(parents=True)
     (tmp_path / "packages" / "lib" / "pyproject.toml").write_text("[project]\n")

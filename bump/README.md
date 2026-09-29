@@ -16,7 +16,11 @@ under the runner's pre-installed `python3`.
 
 - `bump_pin.py` — the ONE pin rewriter. It preserves a `>=A,<B` range's ceiling,
   derives a next-major ceiling for an exact `==A` (dev-channel) pin, keeps a bare
-  `>=A` floor's shape, and moves **every** file a package is pinned in. It also
+  `>=A` floor's shape, and moves **every** file a package is pinned in — and
+  **every occurrence within each file** (a consumer that declares the same pin
+  twice in one `pyproject.toml`, e.g. once in `[project.dependencies]` and again
+  in a `[dependency-groups]` group, bumps both, each occurrence keeping its own
+  shape). It also
   answers `--check` (is this repo a consumer?) and `stage` (stage exactly the
   bump's files, failing loudly on any stray path).
 - `bump_flow.py` — the `gh`-only decision logic: **supersede** older open bump
@@ -60,7 +64,7 @@ jobs:
       issues: write
       actions: read
       checks: read
-    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.9.0
+    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.9.1
     with:
       package: ${{ github.event_name == 'workflow_dispatch' && inputs.package || github.event.client_payload.package }}
       version: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.client_payload.version }}
@@ -158,8 +162,10 @@ The one matcher rewrites exactly three shapes and reports which it did:
   shape is preserved; no ceiling is derived (that would silently narrow a bound
   nobody chose).
 
-Any other pin string fails loudly, **naming what it found** rather than a bare
-"could not find the pin".
+Any other pin string fails loudly, **naming what it found** (and its line) rather
+than a bare "could not find the pin". Every occurrence of the package must
+resolve to one of the three shapes: if any one does not, the whole rewrite fails
+rather than silently leaving a second, unrecognized occurrence stale.
 
 ## A private (CodeArtifact) index
 
@@ -206,13 +212,13 @@ JOB level (`jobs.<id>.uses`), not as a step:
 ```yaml
 jobs:
   bump:
-    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.9.0
+    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.9.1
 ```
 
 If you use the composite action directly, it is a step-level `uses`:
 
 ```yaml
-- uses: schuettc/tools-actions/bump@v0.9.0
+- uses: schuettc/tools-actions/bump@v0.9.1
 ```
 
 Use an **exact runner label** (`ubuntu-26.04`), never a floating `*-latest`
