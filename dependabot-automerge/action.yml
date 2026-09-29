@@ -119,6 +119,7 @@ runs:
       env:
         ACTOR: ${{ github.actor }}
         UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+        NEW_VERSION: ${{ steps.meta.outputs.new-version }}
         PACKAGE_ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         TARGET_BRANCH: ${{ inputs.target-branch }}

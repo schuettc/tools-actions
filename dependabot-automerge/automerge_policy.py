@@ -30,8 +30,10 @@ Environment
   whose ecosystem is not in this list is skipped. Empty is a misuse.
 * ``ALLOW_DOCKER_DIGEST``  — ``true``/``false``. A docker *digest* bump carries
   an empty update-type; docker is ungrouped (one PR per image) so an empty
-  update-type on a docker PR is exactly a digest bump. Docker *tag* bumps always
-  report a ``version-update:semver-*`` type, so this rule never catches them.
+  update-type on a docker PR whose ``NEW_VERSION`` is a ``sha256:`` digest is
+  exactly a digest bump. A docker PR with an empty update-type whose new-version
+  is NOT a digest fails loudly (no fail-open). Docker *tag* bumps always report a
+  ``version-update:semver-*`` type, so this rule never catches them.
 
 Output
 ------
@@ -43,11 +45,19 @@ step fails loudly rather than defaulting to a merge or a silent skip).
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 MERGE = 0
 SKIP = 10
 MISUSE = 1
+
+# A docker digest bump carries an empty update-type, but so would a docker PR for
+# which fetch-metadata failed to classify the change. We only treat an empty
+# docker update-type as a digest bump when the new version actually looks like a
+# digest (an OCI content digest: the ``sha256:`` prefix + 64 lowercase hex). Any
+# other empty docker update-type fails loudly rather than silently merging.
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 # The only update-types fetch-metadata's parser emits (besides the empty digest
 # type). ``allowed-update-types`` tokens must come from this set — a typo like
@@ -76,14 +86,20 @@ def decide(
     allowed_ecosystems: set[str],
     base_ref: str,
     target_branch: str,
+    new_version: str = "",
 ) -> tuple[int, str]:
     """Return ``(exit_code, reason)`` for a single PR.
 
     A PR merges only when it is Dependabot's own, targets the one permitted
     branch, is in an allowed ecosystem, AND either its update-type is explicitly
-    allowed or it is an ungrouped docker digest bump (empty update-type) and
-    digest bumps are permitted. Everything else — majors, unknown types, a PR
-    against the wrong branch or from a disallowed ecosystem — waits.
+    allowed or it is an ungrouped docker digest bump (empty update-type whose
+    ``new-version`` looks like a digest) and digest bumps are permitted.
+    Everything else — majors, unknown types, a PR against the wrong branch or
+    from a disallowed ecosystem — waits.
+
+    No silent fail-open: a docker PR with an empty update-type whose new-version
+    does NOT look like a digest returns ``MISUSE`` so the step fails loudly
+    rather than merging an unclassified change.
     """
     if actor != "dependabot[bot]":
         return SKIP, f"actor {actor!r} is not dependabot[bot]"
@@ -99,7 +115,16 @@ def decide(
     if update_type and update_type in allowed_types:
         return MERGE, f"update-type {update_type} is in the allow-list"
     if allow_docker_digest and ecosystem == "docker" and update_type == "":
-        return MERGE, "docker digest bump (empty update-type on ungrouped docker)"
+        if _DIGEST_RE.match(new_version):
+            return MERGE, (
+                f"docker digest bump (empty update-type, new-version {new_version} "
+                "is a sha256 digest)"
+            )
+        return MISUSE, (
+            f"docker PR has an empty update-type but new-version {new_version!r} "
+            "is not a sha256 digest (expected 'sha256:' + 64 hex); refusing to "
+            "merge an unclassified docker change rather than fail open"
+        )
     return SKIP, (
         f"update-type {update_type!r} for ecosystem {ecosystem!r} is not in policy"
     )
@@ -138,6 +163,7 @@ def main() -> int:
     update_type = os.environ.get("UPDATE_TYPE", "")
     ecosystem = os.environ.get("PACKAGE_ECOSYSTEM", "")
     base_ref = os.environ.get("BASE_REF", "")
+    new_version = os.environ.get("NEW_VERSION", "").strip()
     target_branch = os.environ.get("TARGET_BRANCH", "").strip()
 
     if not target_branch:
@@ -173,7 +199,11 @@ def main() -> int:
         allowed_ecosystems,
         base_ref,
         target_branch,
+        new_version,
     )
+    if code == MISUSE:
+        print(f"::error::{reason}", file=sys.stderr)
+        return MISUSE
     verb = "merge" if code == MERGE else "skip"
     print(f"{verb} {reason}")
     return code

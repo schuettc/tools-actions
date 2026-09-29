@@ -221,8 +221,8 @@ def test_readme_caller_actionlint_clean(tmp_path: Path):
         local_dir.mkdir(parents=True, exist_ok=True)
         local = local_dir / f"_readme_caller_{i}.yml"
         # Swap BOTH sibling actions (the combined caller pairs auto-merge with
-            # the weekly stale sweep) so actionlint validates each with: block
-            # against the real local action.yml.
+        # the weekly stale sweep) so actionlint validates each with: block
+        # against the real local action.yml.
         local.write_text(
             re.sub(
                 r"schuettc/tools-actions/(dependabot-automerge|dependabot-stale)@v\S+",
@@ -275,7 +275,7 @@ def test_readme_every_job_permissions_cover_the_action_it_uses():
     checked = 0
     for doc in _yaml_callers():
         # Top-level permissions must be least-privilege so nothing is ambient.
-        top = doc.get("permissions", doc.get("permissions"))
+        top = doc.get("permissions")
         assert top == {} or top == "none", (
             f"top-level permissions must be {{}} (nothing ambient), got {top!r}"
         )
@@ -398,6 +398,7 @@ DEFAULT_POLICY_ENV = {
     "ALLOWED_UPDATE_TYPES": "version-update:semver-patch version-update:semver-minor",
     "ALLOWED_ECOSYSTEMS": "docker github-actions uv pip npm",
     "ALLOW_DOCKER_DIGEST": "true",
+    "NEW_VERSION": "1.2.3",
 }
 
 
@@ -456,14 +457,101 @@ def test_policy_step_reads_only_real_fetch_metadata_outputs():
         assert name in fm_outputs, f"{name!r} is not a fetch-metadata@v2.5.0 output"
 
 
+# The exact expression the merge step's `if:` must carry. Asserting the WHOLE
+# string (not substrings) means mutating `&&` to `||` (which would arm every
+# admitted Dependabot PR, majors included) changes the string and fails here.
+EXPECTED_MERGE_IF = (
+    "${{ steps.guard.outputs.skip != 'true' "
+    "&& steps.policy.outputs.merge == 'true' }}"
+)
+
+
+def _normalize_ws(s: str) -> str:
+    return " ".join(s.split())
+
+
 def test_merge_step_if_is_gated_exactly_on_the_policy_decision():
     doc = _load(ACTION_YML)
     merge_if = _step_by_id(doc, "merge")["if"]
-    assert "steps.policy.outputs.merge == 'true'" in merge_if, merge_if
-    assert "steps.guard.outputs.skip != 'true'" in merge_if, merge_if
+    # Assert the WHOLE expression, whitespace-normalized, not substrings. A `&&`
+    # -> `||` mutation would survive a substring check but changes this string.
+    assert _normalize_ws(merge_if) == _normalize_ws(EXPECTED_MERGE_IF), merge_if
     # fetch-metadata and the policy only run when the guard did not skip.
     assert _step_by_id(doc, "meta")["if"] == "${{ steps.guard.outputs.skip != 'true' }}"
     assert _step_by_id(doc, "policy")["if"] == "${{ steps.guard.outputs.skip != 'true' }}"
+
+
+def _eval_gha_bool_expr(expr: str, ctx: dict[str, str]) -> bool:
+    """Tiny evaluator for the ``&&``/``||``/``==``/``!=`` subset of a GitHub
+    Actions ``if:`` expression, enough to evaluate the merge gate over its full
+    truth table. It reads the ACTUAL string from action.yml, so a `&&` -> `||`
+    mutation is evaluated as an OR and the truth table below diverges."""
+    inner = expr.strip()
+    if inner.startswith("${{") and inner.endswith("}}"):
+        inner = inner[3:-2].strip()
+
+    def _operand(tok: str) -> str:
+        tok = tok.strip()
+        if len(tok) >= 2 and tok[0] == tok[-1] == "'":
+            return tok[1:-1]  # string literal
+        if tok not in ctx:
+            raise AssertionError(f"unknown operand {tok!r} in {expr!r}")
+        return ctx[tok]
+
+    def _cmp(term: str) -> bool:
+        term = term.strip()
+        if "==" in term:
+            lhs, rhs = term.split("==", 1)
+            return _operand(lhs) == _operand(rhs)
+        if "!=" in term:
+            lhs, rhs = term.split("!=", 1)
+            return _operand(lhs) != _operand(rhs)
+        raise AssertionError(f"unsupported comparison {term!r}")
+
+    # Precedence: && binds tighter than ||, matching GitHub Actions.
+    return any(
+        all(_cmp(term) for term in clause.split("&&"))
+        for clause in inner.split("||")
+    )
+
+
+def test_merge_if_evaluates_correctly_over_its_full_truth_table():
+    """Evaluate the REAL merge `if:` from action.yml over every combination of its
+    two terms and require it to match the oracle `skip != 'true' AND merge ==
+    'true'`. A `&&` -> `||` mutation evaluates as OR and fails at least one row."""
+    merge_if = _step_by_id(_load(ACTION_YML), "merge")["if"]
+    values = ["true", "false", ""]
+    for skip in values:
+        for merge in values:
+            ctx = {
+                "steps.guard.outputs.skip": skip,
+                "steps.policy.outputs.merge": merge,
+            }
+            got = _eval_gha_bool_expr(merge_if, ctx)
+            expected = (skip != "true") and (merge == "true")
+            assert got is expected, (
+                f"merge if evaluated {got} for skip={skip!r} merge={merge!r}, "
+                f"expected {expected}"
+            )
+
+
+def test_merge_if_truth_table_catches_the_and_to_or_mutation():
+    """Guard the guard: prove the truth-table oracle would REJECT the mutated
+    expression (`&&` -> `||`), so item-1's evaluation test genuinely bites."""
+    mutated = EXPECTED_MERGE_IF.replace("&&", "||")
+    values = ["true", "false", ""]
+    mismatch = False
+    for skip in values:
+        for merge in values:
+            ctx = {
+                "steps.guard.outputs.skip": skip,
+                "steps.policy.outputs.merge": merge,
+            }
+            got = _eval_gha_bool_expr(mutated, ctx)
+            expected = (skip != "true") and (merge == "true")
+            if got is not expected:
+                mismatch = True
+    assert mismatch, "the && -> || mutation must diverge from the oracle"
 
 
 def test_decision_outputs_are_step_outputs_not_github_env():
@@ -549,8 +637,13 @@ def _stub_gh(tmp_path: Path) -> tuple[str, Path]:
     return str(bin_dir), calls
 
 
+# A well-formed OCI content digest (sha256: + 64 lowercase hex).
+DIGEST = "sha256:" + "a" * 64
+
+
 def _run_gate(tmp_path: Path, *, update_type: str, ecosystem: str,
-              allowed_update_types: str | None = None):
+              allowed_update_types: str | None = None,
+              new_version: str = "1.2.3"):
     """Execute the real guard, policy and (gated) merge bodies for one simulated
     fetch-metadata result. Returns a dict describing what happened."""
     doc = _load(ACTION_YML)
@@ -565,6 +658,7 @@ def _run_gate(tmp_path: Path, *, update_type: str, ecosystem: str,
     policy_env = {
         **DEFAULT_POLICY_ENV,
         "UPDATE_TYPE": update_type,
+        "NEW_VERSION": new_version,
         "PACKAGE_ECOSYSTEM": ecosystem,
         "GITHUB_ACTION_PATH": str(ACTION_DIR),
     }
@@ -633,9 +727,19 @@ def test_gate_merges_a_minor(tmp_path):
 
 
 def test_gate_merges_a_docker_digest(tmp_path):
-    r = _run_gate(tmp_path, update_type="", ecosystem="docker")
+    r = _run_gate(tmp_path, update_type="", ecosystem="docker", new_version=DIGEST)
     assert r["merged"] is True
     assert "--auto" in r["gh_calls"]
+
+
+def test_gate_fails_loudly_on_docker_empty_update_type_without_a_digest(tmp_path):
+    """An empty docker update-type whose new-version does NOT look like a digest
+    must fail loudly (policy exits non-zero); the merge is never armed (no silent
+    fail-open)."""
+    r = _run_gate(tmp_path, update_type="", ecosystem="docker", new_version="1.2.3")
+    assert r["policy_rc"] not in (0, 10), r  # loud failure, not merge/skip
+    assert r["merge_decision"] is None
+    assert r["merged"] is False and r["gh_calls"] == ""
 
 
 def test_gate_does_not_merge_a_missing_or_unknown_update_type(tmp_path):

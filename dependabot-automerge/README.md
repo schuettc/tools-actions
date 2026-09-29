@@ -130,8 +130,11 @@ guaranteed:
   into — GitHub's default branch, not the integration branch.
 - **a `cooldown` on every entry** (`default-days` ≥ 0), plus `semver-major-days`
   on the SemVer ecosystems (`uv`/`pip`/`npm`; docker and github-actions do not
-  support it), so a freshly published release is never auto-merged the instant it
-  lands — auto-merge always comes with a cooldown.
+  support it), so a freshly published release is not opened for auto-merge the
+  instant it lands. This action does not read or enforce any cooldown; the delay
+  exists only because your `dependabot.yml` sets it (as the example below does).
+  Dependabot applies the cooldown before it opens the PR — the action only sees
+  PRs Dependabot has already decided to open.
 
 Group the SemVer ecosystems by `minor`/`patch` so one PR carries the safe bumps;
 leave **docker ungrouped** (one PR per image) so a digest bump reports

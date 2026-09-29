@@ -40,9 +40,13 @@ TARGET = "dev"
 DEPENDABOT = "dependabot[bot]"
 HUMAN = "octocat"
 
+# A well-formed OCI content digest (sha256: + 64 lowercase hex): what
+# fetch-metadata reports as new-version for a docker digest bump.
+DIGEST = "sha256:" + "a" * 64
+
 
 def _decide(actor, utype, eco, *, allowed=None, digest=True, ecosystems=None,
-            base_ref=TARGET, target=TARGET):
+            base_ref=TARGET, target=TARGET, new_version=""):
     return decide(
         actor,
         utype,
@@ -52,25 +56,26 @@ def _decide(actor, utype, eco, *, allowed=None, digest=True, ecosystems=None,
         DEFAULT_ECOSYSTEMS if ecosystems is None else ecosystems,
         base_ref,
         target,
+        new_version,
     )
 
 
-# (name, actor, ecosystem, update-type, expect_merge)
+# (name, actor, ecosystem, update-type, new-version, expect_merge)
 POLICY_TABLE = [
-    ("patch merges", DEPENDABOT, "npm", "version-update:semver-patch", True),
-    ("minor merges", DEPENDABOT, "uv", "version-update:semver-minor", True),
-    ("major waits", DEPENDABOT, "pip", "version-update:semver-major", False),
-    ("docker digest merges", DEPENDABOT, "docker", "", True),
-    ("docker tag major waits", DEPENDABOT, "docker", "version-update:semver-major", False),
-    ("non-dependabot actor never merges", HUMAN, "npm", "version-update:semver-patch", False),
+    ("patch merges", DEPENDABOT, "npm", "version-update:semver-patch", "1.2.3", True),
+    ("minor merges", DEPENDABOT, "uv", "version-update:semver-minor", "1.3.0", True),
+    ("major waits", DEPENDABOT, "pip", "version-update:semver-major", "2.0.0", False),
+    ("docker digest merges", DEPENDABOT, "docker", "", DIGEST, True),
+    ("docker tag major waits", DEPENDABOT, "docker", "version-update:semver-major", "2.0.0", False),
+    ("non-dependabot actor never merges", HUMAN, "npm", "version-update:semver-patch", "1.2.3", False),
     # An empty update-type on a NON-docker ecosystem is not a digest bump — wait.
-    ("empty update-type on npm waits", DEPENDABOT, "npm", "", False),
+    ("empty update-type on npm waits", DEPENDABOT, "npm", "", "1.2.3", False),
 ]
 
 
-@pytest.mark.parametrize("name,actor,eco,utype,expected", POLICY_TABLE)
-def test_decide_matches_policy(name, actor, eco, utype, expected):
-    code, reason = _decide(actor, utype, eco)
+@pytest.mark.parametrize("name,actor,eco,utype,nver,expected", POLICY_TABLE)
+def test_decide_matches_policy(name, actor, eco, utype, nver, expected):
+    code, reason = _decide(actor, utype, eco, new_version=nver)
     merged = code == MERGE
     assert merged is expected, f"{name}: got {code} ({reason})"
 
@@ -86,10 +91,37 @@ def test_major_merges_only_when_explicitly_allowed():
 
 
 def test_docker_digest_can_be_disabled():
-    code, _ = _decide(DEPENDABOT, "", "docker", digest=False)
+    code, _ = _decide(DEPENDABOT, "", "docker", digest=False, new_version=DIGEST)
     assert code == SKIP
-    code, _ = _decide(DEPENDABOT, "", "docker", digest=True)
+    code, _ = _decide(DEPENDABOT, "", "docker", digest=True, new_version=DIGEST)
     assert code == MERGE
+
+
+@pytest.mark.parametrize(
+    "new_version",
+    [
+        "",
+        "1.2.3",
+        "latest",
+        "sha256:abc",  # too short
+        "sha256:" + "a" * 63,  # 63 hex
+        "sha256:" + "a" * 65,  # 65 hex
+        "sha256:" + "g" * 64,  # non-hex
+        "sha256:" + "A" * 64,  # uppercase (docker digests are lowercase)
+        "md5:" + "a" * 64,  # wrong algorithm prefix
+    ],
+)
+def test_docker_empty_update_type_without_digest_fails_loud(new_version):
+    """An empty docker update-type whose new-version does not look like a digest
+    must fail loudly (MISUSE), never fall through to a silent merge."""
+    code, reason = _decide(DEPENDABOT, "", "docker", new_version=new_version)
+    assert code == MISUSE, f"expected MISUSE for {new_version!r}, got {code}: {reason}"
+    assert code != MERGE
+
+
+def test_docker_empty_update_type_with_real_digest_merges():
+    code, reason = _decide(DEPENDABOT, "", "docker", new_version=DIGEST)
+    assert code == MERGE, reason
 
 
 def test_target_branch_mismatch_never_merges():
@@ -138,20 +170,54 @@ DEFAULT_ENV = {
 }
 
 
-@pytest.mark.parametrize("name,actor,eco,utype,expected", POLICY_TABLE)
-def test_script_exit_code_drives_merge(name, actor, eco, utype, expected):
+@pytest.mark.parametrize("name,actor,eco,utype,nver,expected", POLICY_TABLE)
+def test_script_exit_code_drives_merge(name, actor, eco, utype, nver, expected):
     result = _run(
         {
             **DEFAULT_ENV,
             "ACTOR": actor,
             "PACKAGE_ECOSYSTEM": eco,
             "UPDATE_TYPE": utype,
+            "NEW_VERSION": nver,
         }
     )
     assert result.returncode in (MERGE, SKIP), result.stderr
     merged = result.returncode == MERGE
     assert merged is expected, f"{name}: exit={result.returncode} out={result.stdout}"
     assert result.stdout.startswith("merge " if expected else "skip ")
+
+
+def test_script_docker_empty_update_type_non_digest_fails_loud():
+    """End-to-end: a docker PR with an empty update-type and a non-digest
+    new-version fails loudly (::error::, exit 1) and never merges."""
+    result = _run(
+        {
+            **DEFAULT_ENV,
+            "ACTOR": DEPENDABOT,
+            "PACKAGE_ECOSYSTEM": "docker",
+            "UPDATE_TYPE": "",
+            "NEW_VERSION": "1.2.3",
+        }
+    )
+    assert result.returncode == MISUSE
+    assert result.returncode != MERGE
+    assert "::error::" in result.stderr
+    assert "not a sha256 digest" in result.stderr
+    assert not result.stdout.startswith("merge ")
+
+
+def test_script_docker_empty_update_type_real_digest_merges():
+    result = _run(
+        {
+            **DEFAULT_ENV,
+            "ACTOR": DEPENDABOT,
+            "PACKAGE_ECOSYSTEM": "docker",
+            "UPDATE_TYPE": "",
+            "NEW_VERSION": DIGEST,
+        }
+    )
+    assert result.returncode == MERGE, result.stderr
+    assert result.stdout.startswith("merge ")
 
 
 def test_script_rejects_bad_allow_docker_digest():
