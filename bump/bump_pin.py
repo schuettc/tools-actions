@@ -106,11 +106,21 @@ def load_config(path: Path) -> dict[str, tuple[str, ...]]:
         if "name" not in entry:
             raise ConfigError(f"pins config: [[package]] #{i} is missing 'name'")
         name = entry["name"]
+        if not isinstance(name, str) or not name:
+            raise ConfigError(
+                f"pins config: [[package]] #{i} 'name' must be a non-empty string"
+            )
         if "files" not in entry:
             raise ConfigError(f"pins config: package {name!r} is missing 'files'")
         files = entry["files"]
-        if not isinstance(files, list) or not files or not all(isinstance(f, str) for f in files):
+        if not isinstance(files, list) or not files:
             raise ConfigError(f"pins config: package {name!r} 'files' must be a non-empty list")
+        if not all(isinstance(f, str) for f in files):
+            raise ConfigError(f"pins config: package {name!r} 'files' must all be strings")
+        if not all(f for f in files):
+            raise ConfigError(
+                f"pins config: package {name!r} 'files' must not contain empty strings"
+            )
         if name in packages:
             raise ConfigError(f"pins config: duplicate package {name!r}")
         packages[name] = tuple(files)
@@ -133,6 +143,8 @@ def load_stage_globs(path: Path) -> tuple[str, ...]:
     globs = data.get("stage_globs", [])
     if not isinstance(globs, list) or not all(isinstance(g, str) for g in globs):
         raise ConfigError("pins config: stage_globs must be a list of strings")
+    if not all(g for g in globs):
+        raise ConfigError("pins config: stage_globs must not contain empty strings")
     return tuple(globs)
 
 

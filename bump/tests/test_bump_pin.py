@@ -26,11 +26,14 @@ sys.path.insert(0, str(_BUMP_DIR))
 from bump_pin import (  # noqa: E402
     EXIT_NOT_A_CONSUMER,
     EXIT_NOT_PINNED,
+    ConfigError,
     MissingConsumerFileError,
     PinNotFoundError,
     UnknownConsumerError,
     classify_changes,
     consumer_files,
+    load_config,
+    load_stage_globs,
     main,
     package_names,
     rewrite_pin,
@@ -603,3 +606,139 @@ def test_check_success_emits_no_notice_annotation(tmp_path: Any, capsys: Any) ->
     captured = capsys.readouterr()
     assert "::notice::" not in captured.out
     assert "::notice::" not in captured.err
+
+
+# --- config validation: one dedicated test per load_config/load_stage_globs branch
+# tools-actions ships no copier layer, so these rules are enforced ONLY at runtime.
+# Each test asserts the ConfigError message NAMES the problem, and the empty-string
+# cases guard the images-I1 class of bug (an empty value slipping through).
+
+
+def _toml(tmp_path: Path, body: str) -> Path:
+    path = tmp_path / "pins.toml"
+    path.write_text(body)
+    return path
+
+
+def test_config_missing_file_names_it(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.toml"
+    with pytest.raises(ConfigError) as exc:
+        load_config(missing)
+    assert "does not exist" in str(exc.value) and "nope.toml" in str(exc.value)
+
+
+def test_config_empty_package_table_is_named(tmp_path: Path) -> None:
+    config = _toml(tmp_path, 'stall_label = "chain-stall"\n')
+    with pytest.raises(ConfigError) as exc:
+        load_config(config)
+    assert "[[package]]" in str(exc.value)
+
+
+def test_config_package_missing_name_is_named(tmp_path: Path) -> None:
+    config = _toml(tmp_path, "[[package]]\nfiles = [\"pyproject.toml\"]\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config)
+    assert "name" in str(exc.value)
+
+
+def test_config_package_empty_name_is_named(tmp_path: Path) -> None:
+    config = _toml(tmp_path, '[[package]]\nname = ""\nfiles = ["pyproject.toml"]\n')
+    with pytest.raises(ConfigError) as exc:
+        load_config(config)
+    assert "name" in str(exc.value) and "non-empty" in str(exc.value)
+
+
+def test_config_package_missing_files_is_named(tmp_path: Path) -> None:
+    config = _toml(tmp_path, '[[package]]\nname = "lib-a"\n')
+    with pytest.raises(ConfigError) as exc:
+        load_config(config)
+    assert "lib-a" in str(exc.value) and "files" in str(exc.value)
+
+
+def test_config_package_empty_files_list_is_named(tmp_path: Path) -> None:
+    config = _toml(tmp_path, '[[package]]\nname = "lib-a"\nfiles = []\n')
+    with pytest.raises(ConfigError) as exc:
+        load_config(config)
+    assert "files" in str(exc.value) and "non-empty" in str(exc.value)
+
+
+def test_config_package_non_list_files_is_named(tmp_path: Path) -> None:
+    config = _toml(tmp_path, '[[package]]\nname = "lib-a"\nfiles = "pyproject.toml"\n')
+    with pytest.raises(ConfigError) as exc:
+        load_config(config)
+    assert "files" in str(exc.value)
+
+
+def test_config_package_non_string_files_entry_is_named(tmp_path: Path) -> None:
+    config = _toml(tmp_path, '[[package]]\nname = "lib-a"\nfiles = [123]\n')
+    with pytest.raises(ConfigError) as exc:
+        load_config(config)
+    assert "files" in str(exc.value) and "string" in str(exc.value)
+
+
+def test_config_package_empty_string_file_is_named(tmp_path: Path) -> None:
+    """An empty-string filename is the images-I1 empty-value bug class: it must be
+    rejected loudly, not silently accepted as a valid path."""
+    config = _toml(tmp_path, '[[package]]\nname = "lib-a"\nfiles = [""]\n')
+    with pytest.raises(ConfigError) as exc:
+        load_config(config)
+    assert "files" in str(exc.value) and "empty" in str(exc.value)
+
+
+def test_config_duplicate_package_is_named(tmp_path: Path) -> None:
+    config = _toml(
+        tmp_path,
+        '[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n'
+        '[[package]]\nname = "lib-a"\nfiles = ["b.toml"]\n',
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(config)
+    assert "duplicate" in str(exc.value) and "lib-a" in str(exc.value)
+
+
+def test_config_valid_round_trips(tmp_path: Path) -> None:
+    config = _toml(
+        tmp_path,
+        '[[package]]\nname = "lib-a"\nfiles = ["a.toml", "b.toml"]\n',
+    )
+    assert load_config(config) == {"lib-a": ("a.toml", "b.toml")}
+
+
+# --- stage_globs branches ----------------------------------------------------
+
+
+def test_stage_globs_non_list_is_named(tmp_path: Path) -> None:
+    config = _toml(
+        tmp_path,
+        'stage_globs = "uv.lock"\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n',
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_stage_globs(config)
+    assert "stage_globs" in str(exc.value)
+
+
+def test_stage_globs_non_string_entry_is_named(tmp_path: Path) -> None:
+    config = _toml(
+        tmp_path,
+        'stage_globs = [1]\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n',
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_stage_globs(config)
+    assert "stage_globs" in str(exc.value) and "string" in str(exc.value)
+
+
+def test_stage_globs_empty_string_entry_is_named(tmp_path: Path) -> None:
+    """An empty-string glob is the images-I1 empty-value class: rejected, not
+    silently treated as 'match nothing' (or worse, everything)."""
+    config = _toml(
+        tmp_path,
+        'stage_globs = [""]\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n',
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_stage_globs(config)
+    assert "stage_globs" in str(exc.value) and "empty" in str(exc.value)
+
+
+def test_stage_globs_absent_is_empty_tuple(tmp_path: Path) -> None:
+    config = _toml(tmp_path, '[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n')
+    assert load_stage_globs(config) == ()

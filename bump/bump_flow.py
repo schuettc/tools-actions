@@ -111,6 +111,12 @@ class CommandError(RuntimeError):
     """A subprocess exited non-zero — carries argv, stdout, and stderr."""
 
 
+class ConfigError(Exception):
+    """``pins.toml`` is missing a required key or carries a wrong-typed/empty
+    value. Names the offender — no silent fallback to a value the workflow does
+    not agree with."""
+
+
 def _run(args: list[str]) -> str:
     """THE one subprocess site. Returns stdout; raises on a non-zero exit.
 
@@ -130,18 +136,35 @@ def _gh_json(args: list[str]) -> Any:
 
 
 def _stall_label(config: Path | None) -> str:
-    """The stall-issue label — from ``pins.toml`` (``--config``), else the default.
+    """The stall-issue label — read from ``pins.toml`` (``--config``).
 
-    A missing ``stall_label`` key raises, naming it: no silent fallback to a
-    label the workflow does not agree with.
+    The built-in :data:`STALL_LABEL` default applies ONLY when no ``--config`` is
+    supplied (the offline tests); at runtime the workflow always passes
+    ``--config``, so the label is a project answer. When a config IS supplied the
+    key must be present, a string, and non-empty:
+
+    * a **missing** ``stall_label`` key raises — no silent fallback to a label
+      the workflow does not agree with;
+    * an **empty** (or non-string) ``stall_label`` raises for the same reason: an
+      empty value is a misconfiguration, not a request for the default. Failing
+      loudly here is the whole point of reading the label from config.
     """
     if config is None:
         return STALL_LABEL
     data = tomllib.loads(config.read_text())
     if "stall_label" not in data:
-        raise KeyError(f"{config}: missing required key 'stall_label'")
+        raise ConfigError(f"{config}: missing required key 'stall_label'")
     label = data["stall_label"]
-    return label if label else STALL_LABEL
+    if not isinstance(label, str):
+        raise ConfigError(
+            f"{config}: 'stall_label' must be a string, got {type(label).__name__}"
+        )
+    if not label:
+        raise ConfigError(
+            f"{config}: 'stall_label' is empty — set a non-empty label "
+            "(no silent fallback to the built-in default)."
+        )
+    return label
 
 
 #: Injected in tests. The clock is `monotonic` (immune to wall-clock jumps) and
@@ -439,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "resolve":
             label = _stall_label(args.config)
             return _resolve(args.repo, args.package, args.version, args.pr, label)
-    except CommandError as exc:
+    except (CommandError, ConfigError) as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
 

@@ -86,7 +86,7 @@ loud error that names the offender.
 | --- | --- |
 | `lock_command` | Shell command to relock after the pin moves; `{package}` is substituted. `""` = no lock. |
 | `post_lock_command` | Shell command run after the lock (e.g. an export script). `""` = none. |
-| `stall_label` | The label carried by the one stall issue per package. |
+| `stall_label` | The label carried by the one stall issue per package. **Required and non-empty** when a config is supplied — a missing key, an empty string, or a non-string value fails loudly (no silent fallback to a label the workflow does not agree with). |
 | `stage_globs` | Paths/globs the lock and post-lock commands may change (the lock file plus any exported outputs). Pinned files are always allowed; **anything else the bump changed fails loudly**. |
 | `[[package]]` `name` + `files` | Each consumed package and the file(s) its pin lives in. A package pinned in more than one file has every file rewritten. |
 

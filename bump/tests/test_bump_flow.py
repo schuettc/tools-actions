@@ -537,3 +537,73 @@ def test_run_raises_on_non_zero_exit() -> None:
 
 def test_run_returns_stdout_on_success() -> None:
     assert bump_flow._run(["printf", "hello"]) == "hello"
+
+
+# --- stall label validation (no silent fallback; M3) --------------------------
+
+
+def test_stall_label_defaults_only_when_no_config() -> None:
+    """The built-in default applies ONLY when no --config is supplied (offline)."""
+    assert bump_flow._stall_label(None) == bump_flow.STALL_LABEL
+
+
+def test_stall_label_missing_key_raises_and_names_it(tmp_path: Path) -> None:
+    config = tmp_path / "pins.toml"
+    config.write_text('[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n')
+    with pytest.raises(bump_flow.ConfigError) as exc:
+        bump_flow._stall_label(config)
+    assert "stall_label" in str(exc.value) and "missing" in str(exc.value)
+
+
+def test_stall_label_empty_raises_not_defaults(tmp_path: Path) -> None:
+    """An empty stall_label is a misconfiguration, not a request for the default —
+    it must fail loudly with a ConfigError, never silently fall back."""
+    config = tmp_path / "pins.toml"
+    config.write_text('stall_label = ""\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n')
+    with pytest.raises(bump_flow.ConfigError) as exc:
+        bump_flow._stall_label(config)
+    assert "stall_label" in str(exc.value) and "empty" in str(exc.value)
+
+
+def test_stall_label_wrong_type_raises_and_names_it(tmp_path: Path) -> None:
+    config = tmp_path / "pins.toml"
+    config.write_text('stall_label = 123\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n')
+    with pytest.raises(bump_flow.ConfigError) as exc:
+        bump_flow._stall_label(config)
+    assert "stall_label" in str(exc.value) and "string" in str(exc.value)
+
+
+def test_main_stall_empty_label_exits_1_and_names_it(
+    monkeypatch: Any, tmp_path: Path, capsys: Any
+) -> None:
+    """The empty-label ConfigError surfaces as a `::error::` + exit 1 through main,
+    rather than crashing or silently stalling under the default label."""
+    config = tmp_path / "pins.toml"
+    config.write_text('stall_label = ""\n[[package]]\nname = "lib-a"\nfiles = ["a.toml"]\n')
+    fake = FakeRun(lambda args: None)
+    _install(monkeypatch, fake)
+
+    code = bump_flow.main(
+        [
+            "stall",
+            "--repo",
+            REPO,
+            "--package",
+            PKG,
+            "--version",
+            "1.44.3",
+            "--reason",
+            "failed",
+            "--pr",
+            "-",
+            "--run",
+            "https://example/run/3",
+            "--config",
+            str(config),
+        ]
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "::error::" in err and "stall_label" in err and "empty" in err
+    # No gh call was made — it failed before touching GitHub.
+    assert fake.calls == []

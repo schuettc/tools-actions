@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,12 @@ REPO_ROOT = ACTION_DIR.parents[0]
 ACTION_YML = ACTION_DIR / "action.yml"
 REUSABLE = REPO_ROOT / ".github" / "workflows" / "bump-pin.yml"
 README = ACTION_DIR / "README.md"
+IMAGES_YML = REPO_ROOT / "images" / "action.yml"
+
+# The reusable step-variable guard lives beside this test so other actions can
+# adopt it; import it straight from there.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stepvars import undefined_run_vars  # noqa: E402
 
 _VERSION_PIN = re.compile(r"@v\d+\.\d+\.\d+$")
 
@@ -211,6 +218,49 @@ def test_readme_pins_match_version() -> None:
     assert pins, "README must pin schuettc/tools-actions/... @vX.Y.Z"
     for pin in pins:
         assert pin.endswith(f"@v{_version()}"), f"{pin} does not match VERSION v{_version()}"
+
+
+# --- every run-step variable is defined (the BASE_BRANCH class of bug) --------
+
+
+def test_action_has_no_undefined_run_step_variables() -> None:
+    """Every ``$NAME``/``${NAME}`` a run step reads in the composite is defined by
+    that step's ``env:``, an earlier ``$GITHUB_ENV`` write, a local assignment, a
+    guarding ``${NAME:-}`` operator, or a GitHub default. A miss is a
+    ``set -u`` ``unbound variable`` on every run \u2014 exactly how ``BASE_BRANCH``
+    took the whole action down."""
+    findings = undefined_run_vars(ACTION_YML)
+    assert findings == [], f"undefined run-step variables in {ACTION_YML.name}: {findings}"
+
+
+def test_reusable_workflow_has_no_undefined_run_step_variables() -> None:
+    findings = undefined_run_vars(REUSABLE)
+    assert findings == [], f"undefined run-step variables in {REUSABLE.name}: {findings}"
+
+
+def test_guard_flags_a_dropped_env_var(tmp_path: Path) -> None:
+    """The guard MUST fail on the pre-fix shape: strip ``BASE_BRANCH`` from the
+    step ``env:`` and the guard names every step that then reads it unbound. This
+    is the regression that shipped \u2014 the guard exists to make it impossible."""
+    stripped = ACTION_YML.read_text().replace(
+        "        BASE_BRANCH: ${{ inputs.base_branch }}\n", ""
+    )
+    assert stripped != ACTION_YML.read_text(), "expected BASE_BRANCH env lines to strip"
+    broken = tmp_path / "action.yml"
+    broken.write_text(stripped)
+    findings = undefined_run_vars(broken)
+    flagged = {name for _step, name in findings}
+    assert "BASE_BRANCH" in flagged, f"guard did not catch the dropped BASE_BRANCH: {findings}"
+
+
+def test_guard_runs_against_the_images_action() -> None:
+    """The guard is reusable: run it against ``images/action.yml`` too. Any finding
+    here is a real undefined-variable bug to report (this PR does not change
+    images)."""
+    if not IMAGES_YML.exists():
+        pytest.skip("images/action.yml not present")
+    findings = undefined_run_vars(IMAGES_YML)
+    assert findings == [], f"undefined run-step variables in images/action.yml: {findings}"
 
 
 # --- actionlint (must run, never skip) ---------------------------------------

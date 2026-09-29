@@ -269,6 +269,11 @@ runs:
       env:
         CONFIG: ${{ inputs.config }}
         PRODUCER_RELEASE: ${{ inputs.producer_release }}
+        # BASE_BRANCH is the integration branch the bump targets. A composite
+        # action has no job-level env:, so it MUST be supplied per step that
+        # references it — omit it and every run dies on `set -u` at the first
+        # `git fetch origin "...${BASE_BRANCH}..."`.
+        BASE_BRANCH: ${{ inputs.base_branch }}
       run: |
         set -euo pipefail
         BRANCH="chore/bump-${PACKAGE}-${VERSION}"
@@ -409,6 +414,8 @@ runs:
     - name: Step summary
       if: ${{ success() && env.SKIP != 'true' }}
       shell: bash
+      env:
+        BASE_BRANCH: ${{ inputs.base_branch }}
       run: |
         set -euo pipefail
         {
