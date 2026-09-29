@@ -4,7 +4,7 @@ The `.tools` family Go gate, one step for every Go repo:
 
 1. `gofmt` (ignores `node_modules`, `.worktrees`, `vendor`)
 2. `go vet`
-3. `golangci-lint` v2.12.2 (pinned, checksum-verified). `config verify` runs first, because a config golangci-lint cannot parse falls back silently and lints nothing. The repo's `.golangci.yml` wins; otherwise the family default ([`golangci.yml`](golangci.yml): the standard linters).
+3. `golangci-lint` v2.14.0 (pinned in [`golangci-lint.lock`](golangci-lint.lock), checksum-verified). `config verify` runs first, because a config golangci-lint cannot parse falls back silently and lints nothing. The repo's `.golangci.yml` wins; otherwise the family default ([`golangci.yml`](golangci.yml): the standard linters).
 4. `go test -race`
 5. `CGO_ENABLED=0 go build` for darwin/linux × arm64/amd64
 
@@ -22,7 +22,12 @@ jobs:
 `go-ci/local.sh` runs this gate on your machine at exactly the version your
 `ci.yml` pins (it reads the `go-ci@vX.Y.Z` pin, fetches that version's gate,
 family config and `golangci-lint.lock` into `~/.cache/tools-actions/`, and
-installs the locked golangci-lint if yours differs). Every repo's justfile
+installs the locked golangci-lint if yours differs). It also runs the Go that
+CI's `actions/setup-go` installs from `go.mod`, not the Go on your PATH: the
+`toolchain` directive if present, else the `go` directive, used as is when it
+names a patch and resolved to that minor's newest stable patch (from go.dev,
+cached for offline runs) when it does not. It sets `GOTOOLCHAIN` to that
+version, so Go fetches it once; a `GOTOOLCHAIN` you set yourself is kept. Every repo's justfile
 calls it through one standard recipe, so `just verify` and CI cannot disagree:
 
 ```just
