@@ -162,7 +162,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: schuettc/tools-actions/images@v0.4.0
+      - uses: schuettc/tools-actions/images@v0.5.0
         with:
           command: build
           cdk-out: cdk.out
@@ -178,14 +178,14 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: schuettc/tools-actions/images@v0.4.0
+      - uses: schuettc/tools-actions/images@v0.5.0
         with:
           command: build
           cdk-out: cdk.out
           setup-buildx: "true"
           ecr-login-accounts: "111111111111"
           args: --mode push --cache readwrite --registry 111111111111.dkr.ecr.us-east-1.amazonaws.com/cdk-hnb659fds-container-assets-111111111111-us-east-1
-      - uses: schuettc/tools-actions/images@v0.4.0
+      - uses: schuettc/tools-actions/images@v0.5.0
         with:
           command: assert-present
           cdk-out: cdk.out
@@ -206,18 +206,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - id: promote
-        uses: schuettc/tools-actions/images@v0.4.0
+        uses: schuettc/tools-actions/images@v0.5.0
         with:
           command: promote
           cdk-out: cdk.out
           ecr-login-accounts: "111111111111 222222222222"
-      - uses: schuettc/tools-actions/images@v0.4.0
+      - uses: schuettc/tools-actions/images@v0.5.0
         with:
           command: assert-present
           cdk-out: cdk.out
           ecr-login-accounts: "222222222222"
           args: --account 222222222222
-      - uses: schuettc/tools-actions/images@v0.4.0
+      - uses: schuettc/tools-actions/images@v0.5.0
         with:
           command: check-deployed
           cdk-out: cdk.out
@@ -229,5 +229,5 @@ jobs:
 Pin this action to an exact release tag, never a branch:
 
 ```yaml
-- uses: schuettc/tools-actions/images@v0.4.0
+- uses: schuettc/tools-actions/images@v0.5.0
 ```

@@ -184,3 +184,11 @@ jobs:
       - name: go-ci local runner tests
         shell: bash
         run: bash go-ci/tests/local.sh
+
+  version-guard:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: version-guard tests
+        shell: bash
+        run: bash version-guard/tests/test.sh

@@ -19,10 +19,12 @@ release:
 - [`go-release`](go-release/README.md): builds, signs, notarizes, stamps,
   packages and publishes a Go tool to its GitHub release and download page.
 - [`go-ci`](go-ci/README.md): the family Go gate (gofmt, vet, golangci-lint,
-  race tests, cross-build).
+  race tests, cross-build), and `go-ci/local.sh` to run it locally.
 - [`images`](images/README.md): builds a CDK project's container images once in
   CI, guards deploys (assert-present), promotes dev→prod by digest, and checks
   what's deployed (container Lambda + AWS Batch).
+- [`version-guard`](version-guard/README.md): fails a release-bound PR whose
+  VERSION was not raised.
 
 Each action's README describes its inputs, outputs, and usage.
 
@@ -35,7 +37,7 @@ Callers must pin the action to an exact release tag, never a branch or
 - uses: schuettc/tools-actions/<action>@vX.Y.Z
 ```
 
-`<action>` is the directory name, e.g. `schuettc/tools-actions/fork-sync@v0.4.0`.
+`<action>` is the directory name, e.g. `schuettc/tools-actions/fork-sync@v0.5.0`.
 Floating references (`@main`, `@v1`, no tag at all) are not supported and
 must not be used.
 

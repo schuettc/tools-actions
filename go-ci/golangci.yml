@@ -1,17 +1,37 @@
-# The family's default golangci-lint config (v2), used by go-ci when a repo
-# has no .golangci.yml of its own. The standard set: errcheck, govet,
-# ineffassign, staticcheck, unused. A repo that needs more (or named
-# exclusions) keeps its own config, which go-ci always prefers.
+# The family golangci-lint config (v2): every .tools Go repo uses this one
+# config (go-ci and local.sh pass it). A repo keeps no .golangci.yml; a real
+# exception is an inline `//nolint:<linter> // <why>` on the line itself.
 version: "2"
 run:
-  # Match exclusion paths against the path inside the checkout, so a checkout
-  # that itself lives under <repo>/.worktrees/<branch> (how this family works)
-  # is linted like any other.
+  # Match paths relative to the git root, so a checkout that lives under
+  # <repo>/.worktrees/<branch> (how this family works) is linted normally.
   relative-path-mode: gitroot
 linters:
-  default: standard
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - errorlint    # errors compared or wrapped without errors.Is/As/%w
+    - bodyclose    # an http.Response.Body never closed leaks a connection
+    - nilerr       # `if err != nil { return nil }` silently drops a real error
+    - rowserrcheck # a sql.Rows loop that never checks rows.Err()
+    - copyloopvar  # dead `x := x` copies (Go 1.22 loop semantics)
+    - gocritic     # common bugs and simplifications
+    - gosec        # security mistakes
+    - unparam      # parameters that are always the same, or never read
   exclusions:
     paths:
-      # Go includes node_modules in ./..., and web tooling can vendor Go there.
-      # (.worktrees needs no rule: ./... never enters a directory starting with ".")
+      # Go includes node_modules in ./... (.worktrees needs no rule: ./...
+      # never enters directories that start with ".").
       - (^|/)node_modules/
+    rules:
+      - path: '_test\.go'
+        linters: [gosec, unparam]
+  settings:
+    gosec:
+      excludes:
+        - G107 # HTTP GET of a variable URL: tools fetch their configured and /dl URLs by design
+        - G204 # exec with a variable: these are CLIs that run tools by design
+        - G301 # directory permissions: callers choose them deliberately
+        - G302 # file permissions (chmod): ditto
+        - G304 # reading a path from a variable: these tools read user files
+        - G306 # WriteFile permissions: ditto
+        - G703 # path traversal taint on user-given paths: ditto

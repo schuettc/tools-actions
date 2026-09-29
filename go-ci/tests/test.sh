@@ -104,6 +104,10 @@ if [ -n "${REAL_GOLANGCI_LINT:-}" ]; then
   ( cd "$wt" && git init -q . && "$REAL_GOLANGCI_LINT" run --config "$A/golangci.yml" --max-same-issues=0 ./... ) > "$W/log" 2>&1
   check "lints a checkout that lives under .worktrees/" 'grep -q "cmd/x/main.go:5" "$W/log"'
   check "still excludes node_modules" '! grep -q "node_modules/q/q.go" "$W/log"'
+  # The family set is stricter than golangci's standard: errorlint must run.
+  printf 'package main\n\nimport (\n\t"errors"\n\t"io"\n)\n\nfunc g() error { return errors.New("x") }\n\nfunc h() bool { return g() == io.EOF }\n\nvar _ = h()\n' > "$wt/cmd/x/el.go"
+  ( cd "$wt" && "$REAL_GOLANGCI_LINT" run --config "$A/golangci.yml" --max-same-issues=0 ./... ) > "$W/log" 2>&1
+  check "the family set includes errorlint" 'grep -q "errorlint" "$W/log" || { sed "s/^/      | /" "$W/log" | tail -5; false; }'
 else
   echo "  (skipped: set REAL_GOLANGCI_LINT to the pinned golangci-lint)"
 fi
