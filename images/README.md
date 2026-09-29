@@ -69,6 +69,10 @@ a Batch image itself, and how it does that depends on the image's shape:
 - anything else (no tag and no digest, or a registry/account other than the
   expected one) fails.
 
+The repo's mutability is read live at check time. Flipping the repo to `MUTABLE`
+later does not retroactively re-point existing tags, but future tags could move,
+so this gate runs on every deploy.
+
 The account and region for the `ecr describe-repositories` / `ecr
 describe-images` reads come from the config and the image's registry URI; they
 are never hardcoded.

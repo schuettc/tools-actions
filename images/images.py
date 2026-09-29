@@ -1113,6 +1113,10 @@ def _resolved_batch_digest(
       digest via ``ecr describe-images``.
     * anything with neither a tag nor a digest, or in a registry/account other
       than the expected one, is rejected.
+
+    The repo mutability is read live at check time. An admin later flipping the
+    repo to MUTABLE does not retroactively re-point existing tags, but future
+    tags could move, so this gate must run on every deploy — and it does.
     """
     proc = _run(
         [
