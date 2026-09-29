@@ -673,7 +673,16 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
-    mode = exact_pins.get(package, _DEFAULT_EXACT_PINS)
+    if package not in exact_pins:
+        # An undeclared package has no file and no rule: fail here, loudly, rather
+        # than defaulting its exact_pins rule and letting a later step decide.
+        print(
+            f"::error::{package!r} is not declared in pins.toml, so there is no file "
+            f"to bump. Known: {', '.join(sorted(exact_pins))}",
+            file=sys.stderr,
+        )
+        return 1
+    mode = exact_pins[package]
 
     try:
         written = rewrite_pin_for_package(package, version, config, root=args.root, exact_pins=mode)

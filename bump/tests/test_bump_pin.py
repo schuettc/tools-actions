@@ -1119,3 +1119,13 @@ def test_set_per_package_keep_overrides_global_range(tmp_path: Any) -> None:
     rc = main(["set", "bh-lake", "0.5.0", "--root", str(tmp_path), "--config", str(config)])
     assert rc == 0
     assert '"bh-lake==0.5.0"' in target.read_text()
+
+
+def test_set_undeclared_package_fails_before_any_rule_is_chosen(tmp_path, capsys):
+    """An undeclared package is refused up front; no exact_pins rule is defaulted."""
+    (tmp_path / "pyproject.toml").write_text('dependencies = ["lib-a>=1.0.0,<2.0.0"]\n')
+    cfg = tmp_path / "pins.toml"
+    cfg.write_text('exact_pins = "keep"\n[[package]]\nname = "lib-a"\nfiles = ["pyproject.toml"]\n')
+    rc = main(["set", "lib-z", "1.2.3", "--root", str(tmp_path), "--config", str(cfg)])
+    assert rc == 1
+    assert "'lib-z' is not declared in pins.toml" in capsys.readouterr().err
