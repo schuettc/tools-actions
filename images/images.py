@@ -329,6 +329,15 @@ def _lambda_shape_error(label: str, media_type: str) -> str | None:
     )
 
 
+# An ECR registry host is exactly ``<12-digit-account>.dkr.ecr.<region>.amazonaws.com``.
+# Anchored and case-sensitive on purpose: this refuses lookalikes
+# (``\u2026amazonaws.com.evil.io``, ``\u2026.evil.example``, a bare suffix), the
+# ``.amazonaws.com.cn`` and ``dkr.ecr-fips.\u2026`` partitions, and uppercased hosts.
+# A host that matches is still only *accepted* when it equals the one expected
+# endpoint; matching here just distinguishes "not ECR at all" from "wrong ECR".
+_ECR_HOST_RE = re.compile(r"^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com$")
+
+
 def _bootstrap_repo(account: str, qualifier: str, region: str) -> str:
     return f"cdk-{qualifier}-container-assets-{account}-{region}"
 
@@ -536,30 +545,41 @@ def _exclusion_matches_tag(exclusion: object, tag: str) -> bool:
     """Whether one ECR tag-mutability exclusion filter matches ``tag``.
 
     An ``IMMUTABLE_WITH_EXCLUSION`` repository carries
-    ``imageTagMutabilityExclusionFilters``: each is
-    ``{imageTagMutabilityExclusionFilterType, imageTagMutabilityExclusionFilterValue}``
-    where the only documented type is ``WILDCARD`` (``*`` matches any run). A tag
-    the filter matches is *mutable* even in an otherwise-immutable repo. Any
-    filter shape we do not understand is treated conservatively as matching, so
-    an unrecognized exclusion makes us refuse the tag rather than trust it.
+    ``imageTagMutabilityExclusionFilters``. The real API shape, from the ECR
+    service model (botocore/aws-cli ``ecr`` ``service-2.json``, shape
+    ``ImageTagMutabilityExclusionFilter``), is
+    ``{"filterType": "WILDCARD", "filter": "<pattern>"}`` — ``filterType`` is an
+    enum whose only value is ``WILDCARD`` and ``filter`` matches
+    ``^[0-9a-zA-Z._*-]{1,128}$``. Per the model and the ECR docs, a ``WILDCARD``
+    filter's ``*`` matches any sequence of characters; we implement that
+    fnmatch-style, anchored to the whole tag. A tag the filter matches is
+    *mutable* even in an otherwise-immutable repo.
+
+    Any filter shape we do not understand — a non-dict entry, a missing/
+    non-string ``filter``, or an unknown ``filterType`` (anything other than
+    ``WILDCARD``) — is treated conservatively as *matching*, so an unrecognized
+    exclusion makes us refuse the tag rather than trust it.
     """
     if not isinstance(exclusion, dict):
         return True
-    filter_type = exclusion.get("imageTagMutabilityExclusionFilterType")
-    value = exclusion.get("imageTagMutabilityExclusionFilterValue")
+    filter_type = exclusion.get("filterType")
+    value = exclusion.get("filter")
     if filter_type != "WILDCARD" or not isinstance(value, str):
         return True
+    # WILDCARD: ``*`` matches any sequence of characters, anchored to the tag.
     pattern = "^" + ".*".join(re.escape(part) for part in value.split("*")) + "$"
     return re.match(pattern, tag) is not None
 
 
 def _repo_tag_is_immutable(repository_record: dict[str, object], tag: str) -> bool:
-    """Whether ``tag`` is an immutable identity in this ECR repository.
+    """Whether ``tag`` currently resolves immutably in this ECR repository.
 
-    ``IMMUTABLE`` guarantees every tag is write-once. ``IMMUTABLE_WITH_EXCLUSION``
-    guarantees it only for tags no exclusion filter matches. Everything else
+    ``IMMUTABLE`` blocks *overwriting* an existing tag; ``IMMUTABLE_WITH_EXCLUSION``
+    does so only for tags no exclusion filter matches. Everything else
     (``MUTABLE``, ``MUTABLE_WITH_EXCLUSION``, or an unknown value) means the tag
-    could be repointed, so it is not a stable identity.
+    can be repointed on the next push, so it is not immutable now. Note even
+    ``IMMUTABLE`` is point-in-time: the tag can still be deleted and re-pushed,
+    or the repo flipped to ``MUTABLE`` (see ``_resolved_batch_digest``).
     """
     mutability = repository_record.get("imageTagMutability")
     if mutability == "IMMUTABLE":
@@ -1105,18 +1125,34 @@ def _resolved_batch_digest(
 
     * ``<repo>@sha256:...`` (with or without a leading ``:tag``) resolves to that
       digest directly.
-    * ``<repo>:tag`` (no digest) is trustworthy only when the repository is
-      IMMUTABLE for that tag — CDK's ``ContainerImage.fromDockerImageAsset``
-      renders ``<bootstrap-repo>:<asset-hash>`` and the CDK bootstrap
-      container-assets repo is created IMMUTABLE, making the tag a write-once
-      identity. We verify the repo mutability, then resolve the tag to its
-      digest via ``ecr describe-images``.
-    * anything with neither a tag nor a digest, or in a registry/account other
-      than the expected one, is rejected.
+    * ``<repo>:tag`` (no digest) is accepted only when the repository is
+      IMMUTABLE for that tag. CDK's ``ContainerImage.fromDockerImageAsset``
+      renders ``<expected-host>/<bootstrap-repo>:<asset-hash>`` and the CDK
+      bootstrap container-assets repo is created IMMUTABLE. We require the host
+      to equal ``<prod_account>.dkr.ecr.<region>.amazonaws.com`` *exactly* and
+      the repo to equal the expected bootstrap repo, verify the repo
+      mutability, then resolve the tag to its digest via ``ecr
+      describe-images``. Lookalike hosts (``…amazonaws.com.evil``, ``.cn``,
+      FIPS, uppercase, or a different account/region) are refused.
+    * anything with neither a tag nor a digest, or a host/repo other than the
+      expected one (for *either* form), is rejected.
 
-    The repo mutability is read live at check time. An admin later flipping the
-    repo to MUTABLE does not retroactively re-point existing tags, but future
-    tags could move, so this gate must run on every deploy — and it does.
+    This is a **point-in-time** check of an inherently mutable-in-time
+    reference, not a durable guarantee:
+
+    * IMMUTABLE blocks *overwriting* an existing tag, but the same tag can still
+      be **deleted and re-pushed** (``BatchDeleteImage``, or a lifecycle rule
+      that expires it) to point at different content.
+    * an admin flipping the repo to MUTABLE lets the tag be overwritten on the
+      next push.
+    * Batch resolves the tag when each **job starts**, not at deploy, so the
+      exposure lasts from this check until the job definition is replaced
+      (possibly many runs / months).
+
+    Mitigations the caller owns: keep no lifecycle rule that expires a tag a
+    live job definition still references, and restrict ``ecr:BatchDeleteImage``
+    on the bootstrap repo. The ``@digest`` form has none of these limits: it
+    pins content directly.
     """
     proc = _run(
         [
@@ -1135,25 +1171,40 @@ def _resolved_batch_digest(
     image = _deployed_batch_image(definitions[0])
     if not isinstance(image, str) or not image:
         return None, "no resolved image digest"
-    if "@" in image:
-        return image.split("@", 1)[1], None
-
-    # A tag with no digest. Parse the ECR registry URI: only an immutable-repo
-    # tag in the expected account/region is a stable identity we can resolve.
-    host, sep, path = image.partition("/")
-    if not sep or ":" not in path:
-        return None, f"image {image!r} has neither a tag nor a digest"
-    repository, tag = path.rsplit(":", 1)
-    host_parts = host.split(".")
-    if len(host_parts) < 5 or host_parts[1] != "dkr" or host_parts[2] != "ecr":
-        return None, f"image {image!r} is not an ECR registry"
-    account, host_region = host_parts[0], host_parts[3]
+    # Parse ``<host>/<repo>[:tag][@digest]``. Validate the host and repo
+    # *exactly* for BOTH the tag and the digest form: the host must equal the
+    # one expected ECR endpoint (refusing lookalikes, ``.cn``, FIPS, uppercase
+    # and other accounts/regions) and the repo the expected bootstrap repo.
+    ref, _, digest = image.partition("@")
+    host, sep, path = ref.partition("/")
+    if not sep:
+        return None, f"image {image!r} is not an ECR registry reference"
+    if ":" in path:
+        repository, tag = path.rsplit(":", 1)
+    else:
+        repository, tag = path, None
+    expected_host = f"{config.prod_account}.dkr.ecr.{config.region}.amazonaws.com"
     expected_repo = _bootstrap_repo(config.prod_account, config.bootstrap_qualifier, config.region)
-    if account != config.prod_account or host_region != config.region:
+    if not _ECR_HOST_RE.match(host):
+        return None, f"image {image!r} is not an ECR registry"
+    if host != expected_host:
         return None, (
             f"image {image!r} is a different registry than expected "
-            f"({config.prod_account}.dkr.ecr.{config.region}.amazonaws.com/{expected_repo})"
+            f"({expected_host}/{expected_repo})"
         )
+    if repository != expected_repo:
+        return None, (
+            f"image {image!r} is not the expected bootstrap repository "
+            f"{expected_repo!r}"
+        )
+    account, host_region = config.prod_account, config.region
+
+    # A digest pins content directly; accept it once host/repo are validated.
+    if digest:
+        return digest, None
+    if tag is None:
+        return None, f"image {image!r} has neither a tag nor a digest"
+
     repository_record = _describe_repository(repository, registry_id=account, region=host_region)
     if not _repo_tag_is_immutable(repository_record, tag):
         mutability = repository_record.get("imageTagMutability")
@@ -1164,6 +1215,12 @@ def _resolved_batch_digest(
     described = _describe_image(repository, tag, registry_id=account, region=host_region)
     if described is None:
         return None, f"image {image!r} tag {tag!r} not found in repository {repository!r}"
+    details = described.get("imageDetails")
+    if not isinstance(details, list) or not details:
+        return None, (
+            f"image {image!r} tag {tag!r} has no image details in repository "
+            f"{repository!r}"
+        )
     return _digest_of(described), None
 
 
@@ -1190,17 +1247,31 @@ def _cmd_check_deployed(args: argparse.Namespace) -> int:
         if want is None:
             problems.append(f"{name}: no dev digest for hash {container.hash}")
             continue
-        physical = _describe_stack_resource(container.stack, container.logical_id, config.region)
-        if physical is None:
-            problems.append(f"{name}: not found in deployed stack")
-            continue
-        if container.kind == "lambda":
-            running = _resolved_lambda_digest(physical, config.region)
-        else:
-            running, reason = _resolved_batch_digest(physical, config)
-            if reason is not None:
-                problems.append(f"{name} ({physical}): {reason}")
+        # Any AWS call below (describe-stack-resource, get-function,
+        # describe-job-definitions, describe-repositories, describe-images) can
+        # fail per resource (AccessDenied, RepositoryNotFound, throttling).
+        # Catch only that specific RunError, name the resource and error, and
+        # keep going with the rest; the non-empty report still exits nonzero.
+        physical: str | None = None
+        try:
+            physical = _describe_stack_resource(
+                container.stack, container.logical_id, config.region
+            )
+            if physical is None:
+                problems.append(f"{name}: not found in deployed stack")
                 continue
+            if container.kind == "lambda":
+                running, reason = _resolved_lambda_digest(physical, config.region), None
+            else:
+                running, reason = _resolved_batch_digest(physical, config)
+        except RunError as err:
+            where = f"{name} ({physical})" if physical else name
+            detail = err.stderr.strip() or str(err)
+            problems.append(f"{where}: AWS error resolving deployed image: {detail}")
+            continue
+        if reason is not None:
+            problems.append(f"{name} ({physical}): {reason}")
+            continue
         if running is None:
             problems.append(f"{name} ({physical}): no resolved image digest")
             continue

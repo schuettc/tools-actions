@@ -54,28 +54,51 @@ image string verbatim and never resolves a tag. So `check-deployed` must resolve
 a Batch image itself, and how it does that depends on the image's shape:
 
 - `<repo>@sha256:…` (with or without a leading `:tag`) — the digest is used
-  directly and must equal the expected (promoted) dev digest.
+  directly and must equal the expected (promoted) dev digest. A digest pins
+  content, so this form has **none** of the point-in-time caveats below.
 - `<repo>:tag` (a bare tag, no digest) — CDK's
   `ContainerImage.fromDockerImageAsset` renders `<bootstrap-repo>:<asset-hash>`.
-  A tag is normally not a stable identity, but the CDK bootstrap
-  `cdk-<qualifier>-container-assets-<account>-<region>` repo is created
-  **IMMUTABLE**, so that tag is write-once and *is* a stable identity. The tag is
-  accepted only if all three hold: (1) the repo's `imageTagMutability` is
+  The CDK bootstrap `cdk-<qualifier>-container-assets-<account>-<region>` repo
+  is created **IMMUTABLE**, so at check time that tag currently resolves to one
+  digest. The tag is accepted only if all four hold: (1) the registry host
+  equals `<prod-account>.dkr.ecr.<region>.amazonaws.com` **exactly** and the
+  repo equals the expected bootstrap repo — lookalike hosts
+  (`…amazonaws.com.evil`, a `.amazonaws.com` suffix, the `.amazonaws.com.cn`
+  partition, FIPS `dkr.ecr-fips.…`, an uppercased host, or a different
+  account/region) are refused; (2) the repo's `imageTagMutability` is
   `IMMUTABLE` (or `IMMUTABLE_WITH_EXCLUSION` with no exclusion filter matching
-  the tag), (2) the tag resolves to a digest via `ecr describe-images`, and
-  (3) that digest equals the expected dev digest. Otherwise it fails loudly,
+  the tag); (3) the tag resolves to a digest via `ecr describe-images`; and
+  (4) that digest equals the expected dev digest. Otherwise it fails loudly,
   naming the job definition, the image string and the reason — a mutable repo, a
   tag not found, or a digest mismatch.
-- anything else (no tag and no digest, or a registry/account other than the
-  expected one) fails.
+- anything else (no tag and no digest, or a host/repo other than the expected
+  one, for **either** form) fails.
 
-The repo's mutability is read live at check time. Flipping the repo to `MUTABLE`
-later does not retroactively re-point existing tags, but future tags could move,
-so this gate runs on every deploy.
+**This is a point-in-time check, not a durable guarantee.** ECR `IMMUTABLE`
+blocks *overwriting* an existing tag, but it does **not** make a tag
+"write-once": the same tag can be **deleted and re-pushed** to point at
+different content (`BatchDeleteImage`, or a lifecycle rule that expires it),
+and an admin can flip the repo to `MUTABLE`, after which existing tags can be
+overwritten on the next push. AWS Batch resolves the tag when **each job
+starts** — not at deploy — so the exposure lasts from this check until the job
+definition is replaced, which can be many runs over months. To keep the tag
+stable in practice, callers should: keep **no lifecycle rule that expires a tag
+a live job definition still references**, and **restrict
+`ecr:BatchDeleteImage`** on the bootstrap repo. The `@digest` form avoids all
+of this by pinning content directly.
 
 The account and region for the `ecr describe-repositories` / `ecr
 describe-images` reads come from the config and the image's registry URI; they
-are never hardcoded.
+are never hardcoded. The expected registry host and repo are derived from
+`config.prod_account`, so a `check-deployed` run always compares against the
+prod account (a promote to a different `--to-account` is refused — it fails
+closed).
+
+The exclusion-filter shape read from `ecr describe-repositories` is the real
+ECR API shape: `imageTagMutabilityExclusionFilters` is a list of
+`{"filterType": "WILDCARD", "filter": "<pattern>"}`, where a `WILDCARD`
+`filter`'s `*` matches any sequence of characters (anchored to the whole tag).
+An unknown `filterType` is treated as matching, i.e. the tag is refused.
 
 ## Inputs
 
