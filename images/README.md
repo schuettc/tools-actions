@@ -149,7 +149,7 @@ snippets below use `ubuntu-latest`; substitute your own runner label.
 ```yaml
 jobs:
   verify-images:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: schuettc/tools-actions/images@v0.3.0
@@ -165,7 +165,7 @@ jobs:
 ```yaml
 jobs:
   build-images:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: schuettc/tools-actions/images@v0.3.0
@@ -192,7 +192,7 @@ verbatim (it is word-split, so it must stay compact). The action wires
 ```yaml
 jobs:
   promote:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
       - id: promote
