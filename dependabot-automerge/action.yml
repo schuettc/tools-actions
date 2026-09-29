@@ -1,0 +1,129 @@
+name: Dependabot auto-merge policy
+description: >-
+  Arms GitHub-native auto-merge on a Dependabot PR that meets a policy, so it
+  lands on its own when the required checks pass. Runs dependabot/fetch-metadata
+  at an exact pin, evaluates the ONE policy decision (automerge_policy.py, beside
+  this action, run via $GITHUB_ACTION_PATH), and — only for allowed updates —
+  runs `gh pr merge --auto`. It NEVER checks out or executes PR-controlled code,
+  and refuses to act on any PR that is not Dependabot's own. Every policy value
+  is an input; nothing about a calling project is baked in.
+
+# Security model (see README): this action is meant to run from a caller's
+# `pull_request` workflow (NOT `pull_request_target`), gated by
+# `github.actor == 'dependabot[bot]'`, with a minimally elevated GITHUB_TOKEN
+# (contents: write, pull-requests: write). As defense in depth it re-checks the
+# actor and event here and never checks out the PR, so an accidentally
+# ungated caller still cannot auto-merge a non-Dependabot PR.
+inputs:
+  github-token:
+    description: >-
+      GITHUB_TOKEN elevated by the caller's `permissions:` (contents: write,
+      pull-requests: write). Used by fetch-metadata and `gh pr merge`.
+    required: true
+  merge-method:
+    description: "How auto-merge lands the PR: squash | merge | rebase."
+    required: false
+    default: "squash"
+  allowed-update-types:
+    description: >-
+      Space/comma-separated fetch-metadata update-types that may auto-merge.
+      Default is patch + minor; add version-update:semver-major to auto-merge
+      majors (they wait for review by default).
+    required: false
+    default: "version-update:semver-patch version-update:semver-minor"
+  allow-docker-digest:
+    description: >-
+      Auto-merge docker digest bumps (package-ecosystem docker with an empty
+      update-type, i.e. an ungrouped single-image digest bump). true | false.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # Defense in depth: only Dependabot's own pull_request events proceed. A
+    # non-PR event or a non-Dependabot actor is skipped (not failed) so an
+    # ungated caller degrades safely instead of merging the wrong PR.
+    - name: Guard - only Dependabot's own pull_request
+      id: guard
+      shell: bash
+      env:
+        ACTOR: ${{ github.actor }}
+        EVENT_NAME: ${{ github.event_name }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        # A required input that is empty is a misconfiguration, not a skip: the
+        # runner does not enforce composite `required:`, so fail loudly here.
+        if [ -z "$GH_TOKEN" ]; then
+          echo "::error::github-token is required and must not be empty (pass secrets.GITHUB_TOKEN)."
+          exit 1
+        fi
+        if [ "$EVENT_NAME" != "pull_request" ]; then
+          echo "Event is '$EVENT_NAME', not 'pull_request' — refusing to auto-merge (use a pull_request-triggered caller, never pull_request_target)."
+          echo "SKIP=true" >> "$GITHUB_ENV"
+          exit 0
+        fi
+        if [ "$ACTOR" != "dependabot[bot]" ]; then
+          echo "Actor '$ACTOR' is not dependabot[bot] — refusing to auto-merge."
+          echo "SKIP=true" >> "$GITHUB_ENV"
+          exit 0
+        fi
+        echo "SKIP=false" >> "$GITHUB_ENV"
+
+    - name: Fetch Dependabot metadata
+      id: meta
+      if: ${{ env.SKIP != 'true' }}
+      uses: dependabot/fetch-metadata@v2.5.0
+      with:
+        github-token: ${{ inputs.github-token }}
+
+    # The ONE policy decision. Exit 0 = merge, 10 = skip, anything else = misuse
+    # (fail loudly). Everything reaches the script through env; no ${{ }} in run.
+    - name: Evaluate auto-merge policy
+      id: policy
+      if: ${{ env.SKIP != 'true' }}
+      shell: bash
+      env:
+        ACTOR: ${{ github.actor }}
+        UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+        PACKAGE_ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
+        ALLOWED_UPDATE_TYPES: ${{ inputs.allowed-update-types }}
+        ALLOW_DOCKER_DIGEST: ${{ inputs.allow-docker-digest }}
+      run: |
+        set -euo pipefail
+        DECISION=0
+        python3 "$GITHUB_ACTION_PATH/automerge_policy.py" || DECISION=$?
+        if [ "$DECISION" -eq 0 ]; then
+          echo "MERGE=true" >> "$GITHUB_ENV"
+        elif [ "$DECISION" -eq 10 ]; then
+          echo "MERGE=false" >> "$GITHUB_ENV"
+        else
+          echo "::error::auto-merge policy evaluation failed (exit $DECISION)"
+          exit "$DECISION"
+        fi
+
+    # Arm GitHub-native auto-merge — never a direct merge. The PR URL is read
+    # from the event payload ($GITHUB_EVENT_PATH), so no PR fact is passed in and
+    # no PR code is checked out.
+    - name: Arm native auto-merge
+      id: merge
+      if: ${{ env.SKIP != 'true' && env.MERGE == 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        MERGE_METHOD: ${{ inputs.merge-method }}
+      run: |
+        set -euo pipefail
+        PR_URL="$(jq -r '.pull_request.html_url' "$GITHUB_EVENT_PATH")"
+        if [ -z "$PR_URL" ] || [ "$PR_URL" = "null" ]; then
+          echo "::error::could not read .pull_request.html_url from the event payload"
+          exit 1
+        fi
+        case "$MERGE_METHOD" in
+          squash) FLAG="--squash" ;;
+          merge)  FLAG="--merge" ;;
+          rebase) FLAG="--rebase" ;;
+          *) echo "::error::merge-method must be squash|merge|rebase, got '$MERGE_METHOD'"; exit 1 ;;
+        esac
+        gh pr merge --auto "$FLAG" "$PR_URL"
