@@ -23,12 +23,19 @@ PR is Dependabot's own before doing anything. The tested policy decision lives i
    `update-type` and `package-ecosystem`.
 3. Evaluates the policy: merge when the PR targets `target-branch`, its ecosystem
    is in `allowed-ecosystems`, and either the `update-type` is in
-   `allowed-update-types` **or** it is an ungrouped docker **digest** bump
-   (`package-ecosystem == docker` with an empty `update-type`) and
-   `allow-docker-digest` is true. A PR against another branch, from a disallowed
-   ecosystem, or a major (absent from the default allow-list) waits. An empty or
-   invalid `allowed-update-types` / `allowed-ecosystems` fails loudly rather than
-   silently disabling merging.
+   `allowed-update-types` **or** it is an ungrouped docker **digest** bump and
+   `allow-docker-digest` is true. fetch-metadata@v2.5.0 can't parse a digest
+   bump's backticked commit message (`` Bumps node from `2fe369e` to `0e0ff40`. ``),
+   so BOTH `update-type` and `new-version` come out empty; a digest bump is
+   therefore recognised as `package-ecosystem == docker` + empty `update-type` +
+   empty `new-version` **and** a PR title matching Dependabot's digest shape
+   (`` Bump <image> from `<hex>` to `<hex>` ``). The title is read from the event
+   payload via `env`, never interpolated into a shell. A PR against another
+   branch, from a disallowed ecosystem, a major (absent from the default
+   allow-list), or a docker change with an empty `update-type` that is NOT a
+   recognisable digest bump (e.g. a `bookworm` -> `trixie` tag change) waits or
+   fails loudly — never a silent merge. An empty or invalid
+   `allowed-update-types` / `allowed-ecosystems` fails loudly too.
 4. For an allowed PR, runs `gh pr merge --auto` with the chosen merge method.
    Never a direct merge — auto-merge respects the required-checks gate.
 
@@ -41,7 +48,7 @@ PR is Dependabot's own before doing anything. The tested policy decision lives i
 | `merge-method` | no | `squash` | How auto-merge lands the PR: `squash`, `merge` or `rebase`. Validated up front. |
 | `allowed-update-types` | no | `version-update:semver-patch version-update:semver-minor` | Space/comma-separated fetch-metadata update-types that may auto-merge. Add `version-update:semver-major` to auto-merge majors (they wait by default). Must be non-empty and every token must be `version-update:semver-{patch,minor,major}`. |
 | `allowed-ecosystems` | no | `docker github-actions uv pip npm` | Space/comma-separated package-ecosystems whose PRs may auto-merge; any other ecosystem is skipped. Must not be empty. |
-| `allow-docker-digest` | no | `true` | Auto-merge docker digest bumps (docker ecosystem with an empty update-type). `true`/`false`. |
+| `allow-docker-digest` | no | `true` | Auto-merge docker digest bumps (docker ecosystem with an empty update-type and empty new-version whose PR title matches Dependabot's `` Bump <image> from `<hex>` to `<hex>` `` shape). `true`/`false`. |
 
 Everything is a **policy** input; no calling-project fact (repo, org, branch,
 package, required-check name) is baked in. The required checks the merge waits on
@@ -138,9 +145,10 @@ guaranteed:
 
 Group the SemVer ecosystems by `minor`/`patch` so one PR carries the safe bumps;
 leave **docker ungrouped** (one PR per image) so a digest bump reports
-single-dependency metadata with an empty `update-type` (which is exactly what the
-digest rule keys on — grouping docker would make fetch-metadata report the group
-as a semver-major and defeat digest auto-merge):
+single-dependency metadata with an empty `update-type` and empty `new-version`,
+and a per-image PR title (`` Bump <image> from `<hex>` to `<hex>` ``) — which is
+exactly what the digest rule keys on. Grouping docker would make fetch-metadata
+report the group as a semver-major and defeat digest auto-merge:
 
 ```yaml
 version: 2

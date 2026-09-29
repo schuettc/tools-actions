@@ -399,6 +399,7 @@ DEFAULT_POLICY_ENV = {
     "ALLOWED_ECOSYSTEMS": "docker github-actions uv pip npm",
     "ALLOW_DOCKER_DIGEST": "true",
     "NEW_VERSION": "1.2.3",
+    "TITLE": "",
 }
 
 
@@ -437,7 +438,12 @@ def test_policy_step_env_wiring_is_exact():
     env = policy["env"]
     assert env["ACTOR"] == "${{ github.actor }}"
     assert env["UPDATE_TYPE"] == "${{ steps.meta.outputs.update-type }}"
+    assert env["NEW_VERSION"] == "${{ steps.meta.outputs.new-version }}"
     assert env["PACKAGE_ECOSYSTEM"] == "${{ steps.meta.outputs.package-ecosystem }}"
+    # The PR title feeds the docker-digest classifier; it must come from the event
+    # payload (a Dependabot-authored, write-gated field), via env, not ${{ }} in
+    # the run body.
+    assert env["TITLE"] == "${{ github.event.pull_request.title }}"
     assert env["BASE_REF"] == "${{ github.event.pull_request.base.ref }}"
     assert env["TARGET_BRANCH"] == "${{ inputs.target-branch }}"
 
@@ -637,13 +643,15 @@ def _stub_gh(tmp_path: Path) -> tuple[str, Path]:
     return str(bin_dir), calls
 
 
-# A well-formed OCI content digest (sha256: + 64 lowercase hex).
-DIGEST = "sha256:" + "a" * 64
+# A real Dependabot docker DIGEST bump PR title. fetch-metadata leaves BOTH
+# update-type and new-version empty for one (backticked commit message), so the
+# title is the only signal. Captured live: bl0rb/OpenVizPilot#27.
+DIGEST_TITLE = "Bump node from `2fe369e` to `0e0ff40`"
 
 
 def _run_gate(tmp_path: Path, *, update_type: str, ecosystem: str,
               allowed_update_types: str | None = None,
-              new_version: str = "1.2.3"):
+              new_version: str = "1.2.3", title: str = ""):
     """Execute the real guard, policy and (gated) merge bodies for one simulated
     fetch-metadata result. Returns a dict describing what happened."""
     doc = _load(ACTION_YML)
@@ -659,6 +667,7 @@ def _run_gate(tmp_path: Path, *, update_type: str, ecosystem: str,
         **DEFAULT_POLICY_ENV,
         "UPDATE_TYPE": update_type,
         "NEW_VERSION": new_version,
+        "TITLE": title,
         "PACKAGE_ECOSYSTEM": ecosystem,
         "GITHUB_ACTION_PATH": str(ACTION_DIR),
     }
@@ -727,19 +736,60 @@ def test_gate_merges_a_minor(tmp_path):
 
 
 def test_gate_merges_a_docker_digest(tmp_path):
-    r = _run_gate(tmp_path, update_type="", ecosystem="docker", new_version=DIGEST)
+    r = _run_gate(
+        tmp_path, update_type="", ecosystem="docker", new_version="", title=DIGEST_TITLE
+    )
     assert r["merged"] is True
     assert "--auto" in r["gh_calls"]
 
 
 def test_gate_fails_loudly_on_docker_empty_update_type_without_a_digest(tmp_path):
-    """An empty docker update-type whose new-version does NOT look like a digest
-    must fail loudly (policy exits non-zero); the merge is never armed (no silent
-    fail-open)."""
-    r = _run_gate(tmp_path, update_type="", ecosystem="docker", new_version="1.2.3")
+    """An empty docker update-type whose title is a tag-style change (no hex
+    digest) must fail loudly (policy exits non-zero); the merge is never armed (no
+    silent fail-open)."""
+    r = _run_gate(
+        tmp_path, update_type="", ecosystem="docker", new_version="",
+        title="Bump python from `bookworm` to `trixie`",
+    )
     assert r["policy_rc"] not in (0, 10), r  # loud failure, not merge/skip
     assert r["merge_decision"] is None
     assert r["merged"] is False and r["gh_calls"] == ""
+
+
+def test_gate_does_not_merge_a_docker_digest_title_from_a_non_dependabot_actor(tmp_path):
+    """The actor gate precedes title use: even a valid digest title from a human
+    (guard would already skip) never merges. Here the guard runs with the real
+    default (dependabot), so we prove it at the policy layer via a HUMAN ACTOR
+    env override."""
+    doc = _load(ACTION_YML)
+    policy_env = {
+        **DEFAULT_POLICY_ENV,
+        "ACTOR": "octocat",
+        "UPDATE_TYPE": "",
+        "NEW_VERSION": "",
+        "TITLE": DIGEST_TITLE,
+        "PACKAGE_ECOSYSTEM": "docker",
+        "GITHUB_ACTION_PATH": str(ACTION_DIR),
+    }
+    proc, out = _exec_run(_step_by_id(doc, "policy"), policy_env, tmp_path)
+    # The policy STEP exits 0 for a clean skip and records the decision as a step
+    # output; the underlying script exited 10 (SKIP), which becomes merge=false.
+    assert proc.returncode == 0, proc.stderr
+    assert out.get("merge") == "false"
+    assert "skip" in proc.stdout
+
+
+def test_gate_injection_shaped_title_cannot_break_or_merge(tmp_path):
+    """An injection-shaped title (quotes, $(), backticks, newlines) is carried via
+    env into the policy step; it can neither break the script nor merge."""
+    r = _run_gate(
+        tmp_path, update_type="", ecosystem="docker", new_version="",
+        title="Bump node from `2fe369e` to `0e0ff40`; $(touch /tmp/pwned)\n`id`",
+    )
+    assert r["policy_rc"] not in (0, 10), r  # loud failure, never merge
+    assert r["merged"] is False and r["gh_calls"] == ""
+    import os as _os
+    assert not _os.path.exists("/tmp/pwned")
 
 
 def test_gate_does_not_merge_a_missing_or_unknown_update_type(tmp_path):

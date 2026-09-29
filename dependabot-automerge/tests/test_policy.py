@@ -40,13 +40,28 @@ TARGET = "dev"
 DEPENDABOT = "dependabot[bot]"
 HUMAN = "octocat"
 
-# A well-formed OCI content digest (sha256: + 64 lowercase hex): what
-# fetch-metadata reports as new-version for a docker digest bump.
-DIGEST = "sha256:" + "a" * 64
+# Real Dependabot docker DIGEST bump PR titles (ungrouped: one image per PR).
+# fetch-metadata@v2.5.0 leaves BOTH update-type and new-version empty for these
+# (its version regex needs a leading digit, but the version is wrapped in
+# backticks), so the title is the only signal. Captured live from public repos
+# (see the PR-#17 report for URLs):
+#   Bump node from `2fe369e` to `0e0ff40`   -> bl0rb/OpenVizPilot#27
+#   Bump golang from `cf6fca6` to `8a5910f` -> cantabular/hanoverd#270
+#   Bump python from `cad9a2c` to `51dafde` -> andypitcher/IoT_Sentinel#47
+#   Bump debian from `0463431` to `5bc3287` -> vascoguita/raspios-docker#55
+# The commit-message body is identical but prefixed with "Bumps" and suffixed
+# with a period: e.g. "Bumps node from `2fe369e` to `0e0ff40`.".
+REAL_DIGEST_TITLES = [
+    "Bump node from `2fe369e` to `0e0ff40`",
+    "Bump golang from `cf6fca6` to `8a5910f`",
+    "Bump python from `cad9a2c` to `51dafde`",
+    "Bump debian from `0463431` to `5bc3287`",
+]
+DIGEST_TITLE = REAL_DIGEST_TITLES[0]
 
 
 def _decide(actor, utype, eco, *, allowed=None, digest=True, ecosystems=None,
-            base_ref=TARGET, target=TARGET, new_version=""):
+            base_ref=TARGET, target=TARGET, new_version="", title=""):
     return decide(
         actor,
         utype,
@@ -57,25 +72,28 @@ def _decide(actor, utype, eco, *, allowed=None, digest=True, ecosystems=None,
         base_ref,
         target,
         new_version,
+        title,
     )
 
 
-# (name, actor, ecosystem, update-type, new-version, expect_merge)
+# (name, actor, ecosystem, update-type, new-version, title, expect_merge)
 POLICY_TABLE = [
-    ("patch merges", DEPENDABOT, "npm", "version-update:semver-patch", "1.2.3", True),
-    ("minor merges", DEPENDABOT, "uv", "version-update:semver-minor", "1.3.0", True),
-    ("major waits", DEPENDABOT, "pip", "version-update:semver-major", "2.0.0", False),
-    ("docker digest merges", DEPENDABOT, "docker", "", DIGEST, True),
-    ("docker tag major waits", DEPENDABOT, "docker", "version-update:semver-major", "2.0.0", False),
-    ("non-dependabot actor never merges", HUMAN, "npm", "version-update:semver-patch", "1.2.3", False),
+    ("patch merges", DEPENDABOT, "npm", "version-update:semver-patch", "1.2.3", "", True),
+    ("minor merges", DEPENDABOT, "uv", "version-update:semver-minor", "1.3.0", "", True),
+    ("major waits", DEPENDABOT, "pip", "version-update:semver-major", "2.0.0", "", False),
+    # A real digest bump: empty update-type AND empty new-version; the title
+    # carries the `<hex>` -> `<hex>` shape.
+    ("docker digest merges", DEPENDABOT, "docker", "", "", DIGEST_TITLE, True),
+    ("docker tag major waits", DEPENDABOT, "docker", "version-update:semver-major", "2.0.0", "", False),
+    ("non-dependabot actor never merges", HUMAN, "npm", "version-update:semver-patch", "1.2.3", "", False),
     # An empty update-type on a NON-docker ecosystem is not a digest bump — wait.
-    ("empty update-type on npm waits", DEPENDABOT, "npm", "", "1.2.3", False),
+    ("empty update-type on npm waits", DEPENDABOT, "npm", "", "1.2.3", "", False),
 ]
 
 
-@pytest.mark.parametrize("name,actor,eco,utype,nver,expected", POLICY_TABLE)
-def test_decide_matches_policy(name, actor, eco, utype, nver, expected):
-    code, reason = _decide(actor, utype, eco, new_version=nver)
+@pytest.mark.parametrize("name,actor,eco,utype,nver,title,expected", POLICY_TABLE)
+def test_decide_matches_policy(name, actor, eco, utype, nver, title, expected):
+    code, reason = _decide(actor, utype, eco, new_version=nver, title=title)
     merged = code == MERGE
     assert merged is expected, f"{name}: got {code} ({reason})"
 
@@ -91,36 +109,94 @@ def test_major_merges_only_when_explicitly_allowed():
 
 
 def test_docker_digest_can_be_disabled():
-    code, _ = _decide(DEPENDABOT, "", "docker", digest=False, new_version=DIGEST)
+    code, _ = _decide(DEPENDABOT, "", "docker", digest=False, title=DIGEST_TITLE)
     assert code == SKIP
-    code, _ = _decide(DEPENDABOT, "", "docker", digest=True, new_version=DIGEST)
+    code, _ = _decide(DEPENDABOT, "", "docker", digest=True, title=DIGEST_TITLE)
     assert code == MERGE
 
 
+@pytest.mark.parametrize("title", REAL_DIGEST_TITLES)
+def test_every_real_digest_title_merges(title):
+    """Each real Dependabot docker digest title (empty update-type AND empty
+    new-version) is recognised as a digest bump and merges."""
+    code, reason = _decide(DEPENDABOT, "", "docker", new_version="", title=title)
+    assert code == MERGE, f"{title!r}: got {code} ({reason})"
+
+
+def test_conventional_commit_prefixed_and_pathed_digest_titles_merge():
+    """A conventional-commit prefix and a trailing `in <path>` (both real
+    Dependabot title shapes) still merge."""
+    for title in (
+        "chore(deps): bump node from `2fe369e` to `0e0ff40`",
+        "build(deps): Bump golang from `cf6fca6` to `8a5910f` in /docker",
+        "Bump python from `cad9a2c` to `51dafde` in /images/api",
+    ):
+        code, reason = _decide(DEPENDABOT, "", "docker", new_version="", title=title)
+        assert code == MERGE, f"{title!r}: got {code} ({reason})"
+
+
 @pytest.mark.parametrize(
-    "new_version",
+    "new_version,title",
     [
-        "",
-        "1.2.3",
-        "latest",
-        "sha256:abc",  # too short
-        "sha256:" + "a" * 63,  # 63 hex
-        "sha256:" + "a" * 65,  # 65 hex
-        "sha256:" + "g" * 64,  # non-hex
-        "sha256:" + "A" * 64,  # uppercase (docker digests are lowercase)
-        "md5:" + "a" * 64,  # wrong algorithm prefix
+        # An empty update-type with a NON-empty new-version is not a digest bump
+        # (real digest bumps leave new-version empty) — fail loud.
+        ("1.2.3", DIGEST_TITLE),
+        ("sha256:" + "a" * 64, DIGEST_TITLE),
+        # A docker TAG change fetch-metadata can't parse: title has no hex digest.
+        ("", "Bump python from `bookworm` to `trixie`"),
+        ("", "Bump node from 18 to 20"),
+        # An unparsed tag-style update with an empty title, or a non-Dependabot
+        # shaped title, must not be mistaken for a digest bump.
+        ("", ""),
+        ("", "Update the base image"),
+        ("", "Merge branch 'main' into dev"),
     ],
 )
-def test_docker_empty_update_type_without_digest_fails_loud(new_version):
-    """An empty docker update-type whose new-version does not look like a digest
-    must fail loudly (MISUSE), never fall through to a silent merge."""
-    code, reason = _decide(DEPENDABOT, "", "docker", new_version=new_version)
-    assert code == MISUSE, f"expected MISUSE for {new_version!r}, got {code}: {reason}"
+def test_docker_empty_update_type_without_digest_title_fails_loud(new_version, title):
+    """An empty docker update-type that is not a recognisable digest bump (a
+    non-empty new-version, or a title lacking the `<hex>` -> `<hex>` shape) must
+    fail loudly (MISUSE), never fall through to a silent merge."""
+    code, reason = _decide(DEPENDABOT, "", "docker", new_version=new_version, title=title)
+    assert code == MISUSE, f"expected MISUSE for {(new_version, title)!r}, got {code}: {reason}"
     assert code != MERGE
 
 
+def test_tag_style_unparsed_update_fails_loudly():
+    """The reviewer's specific case: a docker tag change (`bookworm` -> `trixie`)
+    that fetch-metadata cannot classify (empty update-type + empty new-version)
+    must fail loudly, NOT be treated as a digest bump."""
+    code, reason = _decide(
+        DEPENDABOT, "", "docker", new_version="", title="Bump python from `bookworm` to `trixie`"
+    )
+    assert code == MISUSE, reason
+
+
+def test_injection_shaped_title_cannot_merge():
+    """A hostile title (quotes, $(), backticks, newlines) is read via env only and
+    can never be a valid digest bump — it fails loudly, never merges."""
+    for title in (
+        "Bump node from `2fe369e` to `0e0ff40`; $(rm -rf /)",
+        "Bump node from `2fe369e` to `0e0ff40`\nmalicious: true",
+        "$(touch /tmp/pwned)",
+        "'; rm -rf / #",
+        "Bump node from `2fe369e` to `0e0ff40` && curl evil",
+        "`id`",
+    ):
+        code, reason = _decide(DEPENDABOT, "", "docker", new_version="", title=title)
+        assert code == MISUSE, f"{title!r} unexpectedly {code}: {reason}"
+        assert code != MERGE
+
+
+def test_actor_gate_still_applies_to_a_valid_digest_title():
+    """Even with a perfectly-valid digest title, a non-Dependabot actor never
+    merges: the actor gate precedes any title use."""
+    code, reason = _decide(HUMAN, "", "docker", new_version="", title=DIGEST_TITLE)
+    assert code == SKIP, reason
+    assert "dependabot[bot]" in reason
+
+
 def test_docker_empty_update_type_with_real_digest_merges():
-    code, reason = _decide(DEPENDABOT, "", "docker", new_version=DIGEST)
+    code, reason = _decide(DEPENDABOT, "", "docker", new_version="", title=DIGEST_TITLE)
     assert code == MERGE, reason
 
 
@@ -147,7 +223,7 @@ def test_ecosystem_not_in_allowlist_never_merges():
     assert code == SKIP
     assert "ecosystem" in reason
     # docker digest for a disallowed ecosystem set also waits.
-    code, _ = _decide(DEPENDABOT, "", "docker", ecosystems={"npm"})
+    code, _ = _decide(DEPENDABOT, "", "docker", ecosystems={"npm"}, title=DIGEST_TITLE)
     assert code == SKIP
 
 
@@ -170,8 +246,8 @@ DEFAULT_ENV = {
 }
 
 
-@pytest.mark.parametrize("name,actor,eco,utype,nver,expected", POLICY_TABLE)
-def test_script_exit_code_drives_merge(name, actor, eco, utype, nver, expected):
+@pytest.mark.parametrize("name,actor,eco,utype,nver,title,expected", POLICY_TABLE)
+def test_script_exit_code_drives_merge(name, actor, eco, utype, nver, title, expected):
     result = _run(
         {
             **DEFAULT_ENV,
@@ -179,6 +255,7 @@ def test_script_exit_code_drives_merge(name, actor, eco, utype, nver, expected):
             "PACKAGE_ECOSYSTEM": eco,
             "UPDATE_TYPE": utype,
             "NEW_VERSION": nver,
+            "TITLE": title,
         }
     )
     assert result.returncode in (MERGE, SKIP), result.stderr
@@ -187,22 +264,59 @@ def test_script_exit_code_drives_merge(name, actor, eco, utype, nver, expected):
     assert result.stdout.startswith("merge " if expected else "skip ")
 
 
-def test_script_docker_empty_update_type_non_digest_fails_loud():
-    """End-to-end: a docker PR with an empty update-type and a non-digest
-    new-version fails loudly (::error::, exit 1) and never merges."""
+@pytest.mark.parametrize("title", REAL_DIGEST_TITLES)
+def test_script_every_real_digest_title_merges(title):
+    """End-to-end via the script: each real docker digest title (empty update-type
+    AND empty new-version) merges (exit 0)."""
     result = _run(
         {
             **DEFAULT_ENV,
             "ACTOR": DEPENDABOT,
             "PACKAGE_ECOSYSTEM": "docker",
             "UPDATE_TYPE": "",
-            "NEW_VERSION": "1.2.3",
+            "NEW_VERSION": "",
+            "TITLE": title,
+        }
+    )
+    assert result.returncode == MERGE, result.stderr
+    assert result.stdout.startswith("merge ")
+
+
+def test_script_docker_empty_update_type_non_digest_fails_loud():
+    """End-to-end: a docker PR with an empty update-type whose title is a tag-style
+    change (no hex digest) fails loudly (::error::, exit 1) and never merges."""
+    result = _run(
+        {
+            **DEFAULT_ENV,
+            "ACTOR": DEPENDABOT,
+            "PACKAGE_ECOSYSTEM": "docker",
+            "UPDATE_TYPE": "",
+            "NEW_VERSION": "",
+            "TITLE": "Bump python from `bookworm` to `trixie`",
         }
     )
     assert result.returncode == MISUSE
     assert result.returncode != MERGE
     assert "::error::" in result.stderr
-    assert "not a sha256 digest" in result.stderr
+    assert "not a recognisable digest bump" in result.stderr
+    assert not result.stdout.startswith("merge ")
+
+
+def test_script_injection_shaped_title_cannot_break_or_merge():
+    """A hostile title passed through env (quotes, $(), backticks, newlines) can
+    neither break the script nor be classified as a digest bump."""
+    result = _run(
+        {
+            **DEFAULT_ENV,
+            "ACTOR": DEPENDABOT,
+            "PACKAGE_ECOSYSTEM": "docker",
+            "UPDATE_TYPE": "",
+            "NEW_VERSION": "",
+            "TITLE": "Bump node from `2fe369e` to `0e0ff40`; $(rm -rf /)\n`id`",
+        }
+    )
+    assert result.returncode == MISUSE
+    assert result.returncode != MERGE
     assert not result.stdout.startswith("merge ")
 
 
@@ -213,7 +327,8 @@ def test_script_docker_empty_update_type_real_digest_merges():
             "ACTOR": DEPENDABOT,
             "PACKAGE_ECOSYSTEM": "docker",
             "UPDATE_TYPE": "",
-            "NEW_VERSION": DIGEST,
+            "NEW_VERSION": "",
+            "TITLE": DIGEST_TITLE,
         }
     )
     assert result.returncode == MERGE, result.stderr
