@@ -19,6 +19,11 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exec docker run --rm -v "$HERE/..:/fs:ro" ${extra[@]+"${extra[@]}"} node:22-bookworm bash -c \
     'apt-get -qq update >/dev/null && apt-get -qq install -y rsync >/dev/null 2>&1 && bash /fs/tests/test.sh'
 fi
+# Hermetic git: a developer's global config (commit/tag signing, hooks) must not
+# reach the fixture repos; with signing on, every fixture commit waits on the
+# signer and the suite hangs.
+GIT_CONFIG_GLOBAL="$(mktemp)"; printf '[user]\n\tname = t\n\temail = t@t\n' > "$GIT_CONFIG_GLOBAL"
+export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM=1
 SCRIPT_KIT="$HERE/../upstream-sync.sh"
 SCRIPT="${SCRIPT:-$HERE/../upstream-sync.sh}"
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
@@ -52,7 +57,19 @@ case "$1 $2" in
   *) :;;
 esac
 EOF
-chmod +x "$W/bin/npm" "$W/bin/gh"
+# npx node@<spec> -p process.execPath: print the path of a fake node for that
+# spec, whose --version is "v<spec>"; NPX_FAIL=<spec> makes one unavailable.
+cat > "$W/bin/npx" <<'NPX'
+#!/usr/bin/env bash
+echo "npx $(printf '%q ' "$@")" >> "$SHIM_LOG"
+spec=""; for a in "$@"; do case "$a" in node@*) spec="${a#node@}";; esac; done
+[ -n "$spec" ] || exit 2
+[ "${NPX_FAIL:-}" = "$spec" ] && { echo "npm ERR! notarget node@$spec" >&2; exit 1; }
+d="$SHIM_DIR/node-$spec/bin"; mkdir -p "$d"
+printf '#!/usr/bin/env bash\n[ "$1" = --version ] && { echo "v%s"; exit 0; }\nexec %q "$@"\n' "$spec" "$(command -v node)" > "$d/node"
+chmod +x "$d/node"; echo "$d/node"
+NPX
+chmod +x "$W/bin/npm" "$W/bin/gh" "$W/bin/npx"
 
 git_q() { git -c init.defaultBranch=main -c user.name=t -c user.email=t@t "$@" >/dev/null 2>&1; }
 
@@ -121,6 +138,30 @@ for variant in root mono; do
   upstream_bump "$D" 1.5.0 0
   run PKG_DIR="$PKG_DIR_ENV" TEST_CMD="grep -q 'OUR PATCH' ${D:+$D/}src.txt"
   check "TEST_CMD passes: publishes" '[ $RC -eq 0 ] && [ -f "$S/published-package.json" ]'
+
+  # current / lts resolve from nodejs.org's release index (NODE_DIST_INDEX in
+  # tests): here current is 27 and the newest LTS 26. A major passes through.
+  printf '[{"version":"v27.1.0","lts":false},{"version":"v26.5.0","lts":"K"},{"version":"v25.9.0","lts":false}]' > "$W/node-index.json"
+  setup "$variant-testnodes" "$D"; export UP_PATH="$S/up"
+  upstream_bump "$D" 1.5.1 0
+  run PKG_DIR="$PKG_DIR_ENV" NODE_DIST_INDEX="file://$W/node-index.json" TEST_NODE_VERSIONS="current lts 24" TEST_CMD="node --version >> $S/ran-on"
+  check "TEST_NODE_VERSIONS: TEST_CMD runs on the job's node, then each listed node (current, lts, a major)" '[ $RC -eq 0 ] && [ "$(sed -n 2,4p "$S/ran-on" | tr "\n" " ")" = "v27 v26 v24 " ] && [ "$(wc -l < "$S/ran-on")" -eq 4 ]'
+  check "TEST_NODE_VERSIONS: publishes when every node passes" '[ -f "$S/published-package.json" ]'
+
+  setup "$variant-testnodefail" "$D"; export UP_PATH="$S/up"
+  upstream_bump "$D" 1.5.2 0
+  run PKG_DIR="$PKG_DIR_ENV" NODE_DIST_INDEX="file://$W/node-index.json" TEST_NODE_VERSIONS="current" TEST_CMD='[ "$(node --version)" != v27 ]'
+  check "TEST_NODE_VERSIONS: a failure on a listed node publishes nothing and names it" '[ $RC -ne 0 ] && ! grep -q "npm publish" "$SHIM_LOG" && grep -q "node@current" "$SHIM_LOG"'
+
+  setup "$variant-testnodemissing" "$D"; export UP_PATH="$S/up"
+  upstream_bump "$D" 1.5.3 0
+  run PKG_DIR="$PKG_DIR_ENV" TEST_NODE_VERSIONS="99" NPX_FAIL=99 TEST_CMD=true
+  check "TEST_NODE_VERSIONS: a node that cannot be fetched fails, publishes nothing" '[ $RC -ne 0 ] && ! grep -q "npm publish" "$SHIM_LOG"'
+
+  setup "$variant-testnodebadindex" "$D"; export UP_PATH="$S/up"
+  upstream_bump "$D" 1.5.4 0
+  run PKG_DIR="$PKG_DIR_ENV" NODE_DIST_INDEX="file:///nonexistent" TEST_NODE_VERSIONS="current" TEST_CMD=true
+  check "TEST_NODE_VERSIONS: current that cannot be resolved fails, publishes nothing" '[ $RC -ne 0 ] && ! grep -q "npm publish" "$SHIM_LOG"'
 
   setup "$variant-testfail" "$D"; export UP_PATH="$S/up"
   upstream_bump "$D" 1.6.0 0

@@ -81,7 +81,7 @@ jobs:
   sync:
     runs-on: ubuntu-26.04
     steps:
-      - uses: schuettc/tools-actions/fork-sync@v0.10.1
+      - uses: schuettc/tools-actions/fork-sync@v0.10.2
         with:
           upstream_repo: "example-org/widget"
           upstream_branch: "main"
@@ -128,6 +128,7 @@ Keep the rest verbatim:
 | `pkg_dir` | yes | | package dir (`.` for root) | `extensions/pi-usage` |
 | `tag_prefix` | yes | | release tag prefix | `v`, `pi-auto-review-v` |
 | `test_cmd` | yes | | installs its own deps; gates publishing | `npm ci && npm run typecheck && npm test` |
+| `test_node_versions` | no | `""` | extra Node versions `test_cmd` also runs on before publishing: majors, or `current` / `lts` from nodejs.org's release index | `"current"` |
 | `build_cmd` | no | `""` | only if the package ships built output | `npm install && npm run build -w extensions/pi-usage` |
 | `force` | no | `"false"` | `"true"` publishes even when already in sync | `${{ inputs.force }}` |
 | `dry_run` | no | `"false"` | `"true"` runs everything but publish, push, tag and issue | `${{ inputs.dry_run }}` |
@@ -135,6 +136,8 @@ Keep the rest verbatim:
 | `node_version` | no | `"22"` | Node.js for `actions/setup-node` | `"22"` |
 | `publish_branch` | no | `schuettc-publish` | reserved for a later release: the sync script supports only `schuettc-publish`, so any other value fails the run in the first step | leave unset |
 | `token` | no | `${{ github.token }}` | checkout, push, tags and issues on the fork | |
+
+**Test on the Node users run.** `node_version` is the job's Node (npm publishing needs one). Set `test_node_versions: "current"` so `test_cmd` also runs on the newest Node release: pi runs on whatever Node the machine has, usually Homebrew's current release, and a fork that only passes on 22 can ship broken there (a native addon with no prebuilt binary for the new major did exactly that to pi-usage).
 
 - `force`, `dry_run` and `notify_test` reach the script as exactly `true`, or
   `false` for anything else (including the empty string a schedule run passes).

@@ -71,7 +71,7 @@ for i in build_cmd force dry_run notify_test node_version publish_branch token; 
   check "input $i is optional" '[ "$(q ".inputs.$i.required")" != true ]'
 done
 check "no unexpected inputs" \
-  '[ "$(yq -r ".inputs | keys | sort | join(\" \")" "$ACTION")" = "build_cmd dry_run force node_version notify_test pkg_dir pkg_name publish_branch tag_prefix test_cmd token upstream_branch upstream_repo" ]'
+  '[ "$(yq -r ".inputs | keys | sort | join(\" \")" "$ACTION")" = "build_cmd dry_run force node_version notify_test pkg_dir pkg_name publish_branch tag_prefix test_cmd test_node_versions token upstream_branch upstream_repo" ]'
 
 echo "== steps"
 check "exactly one run step invokes upstream-sync.sh" '[ "$(yq -r "[$RUN_STEP] | length" "$ACTION")" = 1 ]'
@@ -122,7 +122,7 @@ check "found the script's required variables" '[ -n "$required" ]'
 for v in $required; do
   check "required $v is set in the run step env" 'has_env "$v" && [ -n "$(env_of "$v")" ]'
 done
-for v in UPSTREAM_REPO UPSTREAM_BRANCH PKG_NAME PKG_DIR TAG_PREFIX TEST_CMD BUILD_CMD; do
+for v in UPSTREAM_REPO UPSTREAM_BRANCH PKG_NAME PKG_DIR TAG_PREFIX TEST_CMD TEST_NODE_VERSIONS BUILD_CMD; do
   i="$(tr '[:upper:]' '[:lower:]' <<<"$v")"
   check "$v maps from inputs.$i unchanged" '[ "$(env_of "$v")" = "\${{ inputs.$i }}" ]'
 done
@@ -150,7 +150,7 @@ for pair in FORCE:force DRY_RUN:dry_run NOTIFY_TEST:notify_test; do
   check "$v: dispatch false -> false" '[ "$(eval_flag "$e" false)" = false ]'
 done
 check "run step env has no unexpected keys" \
-  '[ "$(yq -r "$RUN_STEP | .env | keys | sort | join(\" \")" "$ACTION")" = "BUILD_CMD DRY_RUN FORCE GH_TOKEN NOTIFY_TEST PKG_DIR PKG_NAME TAG_PREFIX TEST_CMD UPSTREAM_BRANCH UPSTREAM_REPO" ]'
+  '[ "$(yq -r "$RUN_STEP | .env | keys | sort | join(\" \")" "$ACTION")" = "BUILD_CMD DRY_RUN FORCE GH_TOKEN NOTIFY_TEST PKG_DIR PKG_NAME TAG_PREFIX TEST_CMD TEST_NODE_VERSIONS UPSTREAM_BRANCH UPSTREAM_REPO" ]'
 
 echo "== README caller snippet"
 mkdir -p "$W/repo/.github/workflows"

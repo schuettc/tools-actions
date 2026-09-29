@@ -24,6 +24,8 @@
 #   TAG_PREFIX       git tag prefix for releases, e.g. "v" or "pi-auto-review-v"
 # Optional env:
 #   TEST_CMD         command run (repo root) after the rebase, before anything is published.
+#   TEST_NODE_VERSIONS  space-separated Node versions TEST_CMD also runs on: majors ("24"),
+#                    "current" or "lts" (resolved from NODE_DIST_INDEX, default nodejs.org's).
 #                    Must install its own deps. Failure = issue + no publish. A clean rebase
 #                    is not proof our patches still work; this is.
 #   BUILD_CMD        command run (repo root) before packing, when the package ships built output.
@@ -172,6 +174,28 @@ if [ -n "${TEST_CMD:-}" ]; then
   PHASE="test"
   echo "Testing: ${TEST_CMD}"
   bash -c "$TEST_CMD"
+  # Then again on each extra Node, so a fork is proven on the Node its users
+  # run, not only the job's. A spec is a major ("24"), or "current" / "lts":
+  # the newest release / newest LTS in nodejs.org's release index (the npm
+  # `node` package's own dist-tags lag: its "latest" is still 22). The binary
+  # comes from `npx node@<major>`. Any failure stops the run before anything
+  # is published.
+  for spec in ${TEST_NODE_VERSIONS:-}; do
+    PHASE="test (node@${spec})"
+    major="$spec"
+    case "$spec" in
+      current|lts)
+        major="$(curl -fsSL "${NODE_DIST_INDEX:-https://nodejs.org/dist/index.json}" | SPEC="$spec" node -e '
+          const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
+          const r = process.env.SPEC === "lts" ? d.find((x) => x.lts) : d[0];
+          if (!r) process.exit(1);
+          process.stdout.write(r.version.replace(/^v/, "").split(".")[0]);
+        ')" ;;
+    esac
+    bin="$(npx --yes "node@${major}" -p process.execPath)"
+    echo "Testing on node@${spec} ($("$bin" --version)): ${TEST_CMD}"
+    PATH="$(dirname "$bin"):$PATH" bash -c "$TEST_CMD"
+  done
 fi
 
 if [ -n "${BUILD_CMD:-}" ]; then

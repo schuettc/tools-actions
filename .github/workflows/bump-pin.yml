@@ -115,7 +115,7 @@ jobs:
     steps:
       - name: Bump pin, relock, open PR, auto-merge, await
         id: bump
-        uses: schuettc/tools-actions/bump@v0.10.1
+        uses: schuettc/tools-actions/bump@v0.10.2
         with:
           package: ${{ inputs.package }}
           version: ${{ inputs.version }}

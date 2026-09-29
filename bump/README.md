@@ -64,7 +64,7 @@ jobs:
       issues: write
       actions: read
       checks: read
-    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.10.1
+    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.10.2
     with:
       package: ${{ github.event_name == 'workflow_dispatch' && inputs.package || github.event.client_payload.package }}
       version: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.client_payload.version }}
@@ -224,13 +224,13 @@ JOB level (`jobs.<id>.uses`), not as a step:
 ```yaml
 jobs:
   bump:
-    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.10.1
+    uses: schuettc/tools-actions/.github/workflows/bump-pin.yml@v0.10.2
 ```
 
 If you use the composite action directly, it is a step-level `uses`:
 
 ```yaml
-- uses: schuettc/tools-actions/bump@v0.10.1
+- uses: schuettc/tools-actions/bump@v0.10.2
 ```
 
 Use an **exact runner label** (`ubuntu-26.04`), never a floating `*-latest`
