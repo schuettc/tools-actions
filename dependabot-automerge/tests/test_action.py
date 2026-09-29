@@ -209,10 +209,13 @@ def test_readme_caller_actionlint_clean(tmp_path: Path):
         local_dir = REPO_ROOT / ".github" / "workflows"
         local_dir.mkdir(parents=True, exist_ok=True)
         local = local_dir / f"_readme_caller_{i}.yml"
+        # Swap BOTH sibling actions (the combined caller pairs auto-merge with
+            # the weekly stale sweep) so actionlint validates each with: block
+            # against the real local action.yml.
         local.write_text(
             re.sub(
-                r"schuettc/tools-actions/dependabot-automerge@v\S+",
-                "./dependabot-automerge",
+                r"schuettc/tools-actions/(dependabot-automerge|dependabot-stale)@v\S+",
+                r"./\1",
                 block,
             )
         )

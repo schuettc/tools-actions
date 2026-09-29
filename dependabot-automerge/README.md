@@ -52,21 +52,27 @@ them.
 
 ## Caller example
 
-The trigger, permissions and actor gate live in the **caller** — they are
+The triggers, permissions and actor gate live in the **caller** — they are
 event/permission concerns GitHub only honours at the workflow/job level, and
-keeping them here makes the security posture reviewable at a glance. Pin the
-action to an exact release tag:
+keeping them here makes the security posture reviewable at a glance. Pair the
+`pull_request` auto-merge job with the weekly `schedule` sweep
+([`dependabot-stale`](../dependabot-stale/README.md)) in one workflow, each job
+with its own least-privilege `permissions:` block. Pin both actions to an exact
+release tag:
 
 ```yaml
-name: Dependabot auto-merge
+name: Dependabot
 on:
   pull_request:
-# No ambient permissions; the one job grants only what native auto-merge needs.
+  schedule:
+    # Weekly sweep for held majors that have gone stale.
+    - cron: "17 6 * * 1"
+# No ambient permissions; each job grants only what it needs.
 permissions: {}
 jobs:
   automerge:
     name: Auto-merge allowed Dependabot PRs
-    if: ${{ github.actor == 'dependabot[bot]' }}
+    if: ${{ github.event_name == 'pull_request' && github.actor == 'dependabot[bot]' }}
     runs-on: ubuntu-26.04
     permissions:
       contents: write # enable auto-merge on the PR
@@ -78,10 +84,27 @@ jobs:
           merge-method: squash
           allowed-update-types: version-update:semver-patch version-update:semver-minor
           allow-docker-digest: "true"
+  stale:
+    name: Track stale Dependabot PRs
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      pull-requests: read # list open Dependabot PRs
+      issues: write # open / update / close the tracking issue
+    steps:
+      - uses: schuettc/tools-actions/dependabot-stale@v0.8.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          stale-days: "14"
 ```
 
 `runs-on` is an exact image label (`ubuntu-26.04`), never a floating `*-latest`
 alias.
+
+Auto-merge deliberately **holds major-version PRs** for review; the weekly
+`schedule` job is what keeps those held PRs from rotting silently. Run the pair
+together — see [`dependabot-stale`](../dependabot-stale/README.md).
 
 ## `dependabot.yml` example
 
@@ -155,6 +178,10 @@ Dependabot), not Actions secrets.
 
 ## Scope
 
-This action ports the auto-merge policy. The reviewed source also carried a
+This action ports the auto-merge policy. The reviewed source's other half — a
 weekly *stale Dependabot PR* tracking job (one labelled issue listing PRs left
-open past a threshold); that is a separate concern and is **not** included here.
+open past a threshold) — is a separate concern with its own permissions surface
+(`issues: write`), shipped as the sibling action
+[`dependabot-stale`](../dependabot-stale/README.md). Run the pair together: this
+action lands the safe bumps, `dependabot-stale` keeps the held majors from
+rotting silently.

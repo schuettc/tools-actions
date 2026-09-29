@@ -33,6 +33,9 @@ release:
 - [`dependabot-automerge`](dependabot-automerge/README.md): arms GitHub-native
   auto-merge on Dependabot PRs that meet a policy (patch/minor, docker digests),
   so they land when the required checks pass; majors wait for review.
+- [`dependabot-stale`](dependabot-stale/README.md): a weekly sweep that keeps one
+  labelled tracking issue for Dependabot PRs held open past a threshold, so the
+  majors that auto-merge deliberately holds don't rot silently.
 
 Each action's README describes its inputs, outputs, and usage.
 
