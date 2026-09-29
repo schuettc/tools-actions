@@ -14,7 +14,7 @@ date to stamp, and create / prerelease / skip. Feed its outputs to
 ```yaml
 - uses: actions/checkout@v7.0.1
 - id: rel
-  uses: schuettc/tools-actions/release-version@v0.6.0
+  uses: schuettc/tools-actions/release-version@v0.7.0
   with:
     mode: version-file
     dispatch-tag: ${{ inputs.tag }}

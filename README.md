@@ -25,6 +25,11 @@ release:
   what's deployed (container Lambda + AWS Batch).
 - [`version-guard`](version-guard/README.md): fails a release-bound PR whose
   VERSION was not raised.
+- [`bump`](bump/README.md): the consumer half of the automated producer-first
+  pin-bump chain — rewrites a pin to a published version, relocks, opens a PR and
+  lands it via GitHub-native auto-merge, superseding older bump PRs and opening a
+  loud stall issue on any un-merged ending. Ships with the reusable
+  `.github/workflows/bump-pin.yml` callers pin at the same release tag.
 
 Each action's README describes its inputs, outputs, and usage.
 
@@ -37,7 +42,7 @@ Callers must pin the action to an exact release tag, never a branch or
 - uses: schuettc/tools-actions/<action>@vX.Y.Z
 ```
 
-`<action>` is the directory name, e.g. `schuettc/tools-actions/fork-sync@v0.6.0`.
+`<action>` is the directory name, e.g. `schuettc/tools-actions/fork-sync@v0.7.0`.
 Floating references (`@main`, `@v1`, no tag at all) are not supported and
 must not be used.
 

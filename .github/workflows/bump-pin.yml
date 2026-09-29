@@ -1,0 +1,188 @@
+name: Bump pin (reusable)
+
+# THE reusable consumer half of the automated producer-first release chain.
+# A caller (bump-<source>.yml in the consumer repo) validates only the SHAPE of
+# its repository_dispatch / workflow_dispatch trigger and hands the payload here
+# as DATA. This workflow owns the job shell — per-package concurrency, the write
+# permissions, the App secret, the runner — and delegates every step to the
+# `bump` composite action (pinned to this repo's release), which:
+#
+#   1. re-validates version (X.Y.Z) and package through env — dispatch payloads
+#      are attacker-controllable, so nothing reaches a shell un-validated;
+#   2. mints a GitHub App installation token for every WRITE (branch push, PR
+#      create, merge) — App-created PRs DO trigger CI, so native auto-merge can
+#      land the PR; READs of CI status use the workflow GITHUB_TOKEN;
+#   3. optionally asks bump_pin --check whether this repo consumes the package;
+#   4. supersedes strictly-older open bump PRs, steps aside for a newer one;
+#   5. rewrites the pin via the ONE shared matcher, relocks, opens a PR;
+#   6. arms GitHub-native auto-merge and AWAITS — regenerating on a DIRTY/BEHIND
+#      conflict (up to 3x), failing on any un-merged outcome.
+#
+# On failure OR cancellation the job-level stall step below opens/updates the
+# per-package stall issue. No bump stalls silently. The stall step lives HERE,
+# not inside the composite, because a job-timeout cancellation does not run a
+# composite action's post-failure steps.
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: "Package to pin (validated to a plausible package name in the action)"
+        required: true
+        type: string
+      version:
+        description: "Version to pin (validated to X.Y.Z in the action)"
+        required: true
+        type: string
+      check_consumer:
+        description: "Ask bump_pin --check whether this repo consumes the package (fan-out)"
+        required: true
+        type: boolean
+      producer_release:
+        description: "Human hint naming the producer release to run first"
+        required: true
+        type: string
+      base_branch:
+        description: "Branch the bump PR targets (integration branch)"
+        required: true
+        type: string
+      app_client_id:
+        description: "GitHub App client id (the caller passes it from an Actions variable)"
+        required: true
+        type: string
+      config:
+        description: "Path to the consumer-owned pins.toml"
+        required: false
+        default: "ci/bump/pins.toml"
+        type: string
+      private_index:
+        description: 'JSON: {"kind":"codeartifact",...} or "" for a public index'
+        required: false
+        default: ""
+        type: string
+      runner:
+        description: "runs-on label (an exact image, never a -latest alias)"
+        required: true
+        type: string
+      stall_label:
+        description: >-
+          Fallback stall-issue label, used ONLY when pins.toml is unreadable (a
+          failure before checkout, or a missing/malformed config) so a stall
+          issue is still filed — never a silent default. Set it to the same
+          value as stall_label in pins.toml.
+        required: true
+        type: string
+    secrets:
+      app_private_key:
+        description: "PEM private key of the release App (Contents R/W, Pull requests R/W, Actions R/W)"
+        required: true
+      index_role_arn:
+        description: "OIDC role for the private index token (required when private_index is set)"
+        required: false
+
+# Minimal GITHUB_TOKEN scopes. Every WRITE to the repo (branch push, PR create,
+# PR merge) goes through the App installation token, so GITHUB_TOKEN itself needs
+# only: issues:write (open/close the stall issue), id-token:write (OIDC), and
+# READ on the rest (checkout, await's PR + CI-status reads).
+#
+# id-token:write is requested UNCONDITIONALLY even though only a private_index
+# consumer mints an OIDC token: a reusable workflow's `permissions:` is static and
+# cannot depend on an input, so it cannot be narrowed for public-index callers.
+# It is inert without a private_index (no OIDC step runs).
+permissions:
+  id-token: write # OIDC -> private-index token for relock (inert without private_index)
+  contents: read # checkout only; the App token pushes the bump branch
+  pull-requests: read # await reads PR state; the App token opens + merges
+  issues: write # open/close the stall issue (via GITHUB_TOKEN)
+  actions: read # read CI run status (await) - the App token cannot
+  checks: read # read statusCheckRollup
+
+# Per-package concurrency: GitHub keeps only ONE pending run per group, so a
+# shared group would silently drop other packages' bumps. Keyed on the package
+# so two leaves never queue-evict each other.
+concurrency:
+  group: bump-${{ inputs.package }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Pin bump + relock + PR + auto-merge
+    runs-on: ${{ inputs.runner }}
+    # Budget: await(s) + regeneration overhead MUST stay under timeout-minutes,
+    # or the job is CANCELLED mid-await. The stall step fires on
+    # `failure() || cancelled()`, so a timeout still opens a stall issue.
+    timeout-minutes: 120
+    steps:
+      - name: Bump pin, relock, open PR, auto-merge, await
+        id: bump
+        uses: schuettc/tools-actions/bump@v0.7.0
+        with:
+          package: ${{ inputs.package }}
+          version: ${{ inputs.version }}
+          check_consumer: ${{ inputs.check_consumer }}
+          producer_release: ${{ inputs.producer_release }}
+          base_branch: ${{ inputs.base_branch }}
+          app_client_id: ${{ inputs.app_client_id }}
+          runner: ${{ inputs.runner }}
+          config: ${{ inputs.config }}
+          private_index: ${{ inputs.private_index }}
+          app_private_key: ${{ secrets.app_private_key }}
+          index_role_arn: ${{ secrets.index_role_arn }}
+
+      # The stall issue's label lives in the consumer's pins.toml, but a failure
+      # BEFORE the composite's checkout (validate, missing App secrets, token
+      # mint) leaves pins.toml absent on the runner. Do an independent sparse
+      # checkout of just the config path so the stall path can read the label
+      # even then. If this checkout itself fails, or the file is absent/malformed,
+      # bump_flow falls back to the stall_label input and records the config error
+      # in the issue body (never a silent default).
+      - name: Check out the pins config for the stall issue
+        id: stall_checkout
+        if: ${{ failure() || cancelled() }}
+        continue-on-error: true
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.base_branch }}
+          sparse-checkout: ${{ inputs.config }}
+          sparse-checkout-cone-mode: false
+          path: __bump_stall_cfg
+
+      # No silent stall: every un-merged path (App secrets missing, CI red,
+      # conflict-exhausted, timeout, PR closed, any step failure) lands here.
+      # Fires on failure() OR cancelled(): a `timeout-minutes` cancellation does
+      # NOT count as failure(), so an `if: failure()` step would be skipped and
+      # the bump would drop silently. cancelled() covers the timeout path. The
+      # composite exposed BUMP_SCRIPTS (its own dir) and, on a non-cancel
+      # failure, BUMP_REASON.
+      - name: Open/refresh stall issue on failure
+        if: ${{ failure() || cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PKG: ${{ inputs.package }}
+          VER: ${{ inputs.version }}
+          CONFIG: __bump_stall_cfg/${{ inputs.config }}
+          STALL_LABEL: ${{ inputs.stall_label }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          # A cancellation (timeout or manual) does not run the composite's
+          # reason step, so name it here; else use the reason the composite
+          # computed, then any await outcome, then a fallback.
+          if [ "$JOB_STATUS" = "cancelled" ]; then
+            REASON="cancelled (timeout or manual)"
+          else
+            REASON="${BUMP_REASON:-${AWAIT_OUTCOME:-}}"
+          fi
+          [ -z "$REASON" ] && REASON="workflow failed (no step outcome captured)"
+          # Default-then-assign so the bare use below is a defined local, not a
+          # cross-step $GITHUB_ENV read the static guard cannot see.
+          BUMP_SCRIPTS="${BUMP_SCRIPTS:-}"
+          if [ -z "$BUMP_SCRIPTS" ]; then
+            echo "::error::the bump action did not initialize (BUMP_SCRIPTS unset) — cannot open a stall issue: ${PKG} ${VER} — ${REASON}"
+            exit 1
+          fi
+          python3 "$BUMP_SCRIPTS/bump_flow.py" stall \
+            --repo "$GITHUB_REPOSITORY" --package "$PKG" --version "$VER" \
+            --reason "$REASON" --pr "${PR_URL:--}" --run "$RUN_URL" \
+            --config "$CONFIG" --stall-label "$STALL_LABEL"
