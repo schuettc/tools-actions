@@ -142,7 +142,7 @@ deploy_target = "batch"
 ## Composing the pieces
 
 Callers pin the action to an exact release tag (never a branch or `@main`). The
-snippets below use `ubuntu-latest`; substitute your own runner label.
+snippets below use `ubuntu-26.04`; substitute your own exact runner label (never a `-latest` label).
 
 **PR CI — verify images (build + smoke, no push):**
 
