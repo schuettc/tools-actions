@@ -52,5 +52,12 @@ if [ -n "$want" ] && [ "$have" != "$want" ]; then
   PATH="$gdir:$PATH"; export PATH
 fi
 
+# Worktrees of one module share import paths, so one golangci-lint cache
+# reports findings from other worktrees' files: each checkout gets its own.
+if [ -z "${GOLANGCI_LINT_CACHE:-}" ]; then
+  key="$(printf '%s' "$PWD" | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)"
+  export GOLANGCI_LINT_CACHE="$cache/golangci-lint-cache/$key"
+fi
+
 echo "go-ci local: tools-actions $ver, golangci-lint ${want:-as installed}"
 FAMILY_CONFIG="$dir/golangci.yml" exec bash "$dir/ci.sh"

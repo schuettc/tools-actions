@@ -3,10 +3,22 @@
 # first, because a config golangci-lint cannot parse falls back silently and
 # lints nothing), go test (-race), and a CGO_ENABLED=0 build per release target.
 #
-# Env: PACKAGES (default ./...), RACE (true|false), TARGETS, FAMILY_CONFIG
+# Env: PACKAGES (default ./..., minus anything under node_modules), RACE (true|false), TARGETS, FAMILY_CONFIG
 #      (used when the repo has no .golangci.yml/.golangci.yaml), SKIP_LINT.
 set -euo pipefail
+# Versions are stamped through -ldflags, never by Go's VCS stamping, which
+# fails in a worktree whose repository is bare (exit status 128).
+export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
 pkgs="${PACKAGES:-./...}"
+if [ "$pkgs" = ./... ]; then
+  # ./... includes Go source an npm dependency ships under node_modules; that
+  # is not the repo's code. List first (a failure here must fail the gate),
+  # then filter. Relative directories, not import paths: golangci-lint takes
+  # import paths as directories, fails to load them, and says "0 issues".
+  listed="$(go list -e -f '{{.Dir}}' ./...)"
+  pkgs="$(printf '%s\n' "$listed" | grep -v '/node_modules/' | sed "s#^$PWD\$#.#; s#^$PWD/#./#" || true)"
+  [ -n "$pkgs" ] || { echo "::error::go-ci: no Go packages found"; exit 1; }
+fi
 step() { echo "::group::$1"; }
 end() { echo "::endgroup::"; }
 
@@ -29,10 +41,18 @@ if [ "${SKIP_LINT:-false}" != true ]; then
   for c in .golangci.yml .golangci.yaml; do [ -f "$c" ] && { config="$c"; break; }; done
   config="${config:-${FAMILY_CONFIG:?}}"
   golangci-lint config verify --config "$config"
-  # shellcheck disable=SC2086
   # No caps: golangci-lint's defaults report at most 50 findings per linter
   # (and 3 of any one kind), which hid three quarters of a repo's findings.
-  golangci-lint run --config "$config" --max-issues-per-linter=0 --max-same-issues=0 $pkgs
+  lintlog="$(mktemp)"
+  lrc=0
+  # shellcheck disable=SC2086  # PACKAGES is a list
+  golangci-lint run --config "$config" --max-issues-per-linter=0 --max-same-issues=0 $pkgs 2>&1 | tee "$lintlog" || lrc=$?
+  # A linter that cannot load the code logs level=error and can still report
+  # "0 issues" and exit 0: a gate that stopped looking must not pass.
+  if grep -q 'level=error' "$lintlog"; then
+    rm -f "$lintlog"; echo "::error::go-ci: golangci-lint logged errors (above); it may not have linted the code"; exit 1
+  fi
+  rm -f "$lintlog"; [ "$lrc" -eq 0 ] || exit "$lrc"
   end
 fi
 

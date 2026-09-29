@@ -85,5 +85,19 @@ printf 'version 2.12.2\n%s-%s %s\n' "$os" "$arch" "00000000000000000000000000000
 run GOLANGCI_DL_BASE="file://$W/gcl"; rc=$?
 check "a checksum mismatch fails and installs nothing" '[ $rc -ne 0 ] && grep -qi "checksum" "$W/log" && [ ! -e "$W/cache/tools-actions/golangci-lint/2.12.2/golangci-lint" ]'
 
+echo "== golangci-lint cache per checkout"
+# Worktrees of one module share import paths, so a shared golangci-lint cache
+# reports findings from other worktrees' files. Each checkout gets its own.
+printf '#!/usr/bin/env bash\necho "cache=$GOLANGCI_LINT_CACHE"\n' > "$W/pub/v9.9.9/go-ci/ci.sh"
+printf '#!/bin/sh\necho "golangci-lint has version 2.12.2"\n' > "$W/bin/golangci-lint"
+rm -rf "$W/cache"; printf 'version 2.12.2\n' > "$W/pub/v9.9.9/go-ci/golangci-lint.lock"
+run; c1="$(grep -o 'cache=.*' "$W/log")"
+mkdir -p "$W/repo2/.github/workflows"; cp "$repo/.github/workflows/ci.yml" "$W/repo2/.github/workflows/"
+( cd "$W/repo2" && env PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" TOOLS_ACTIONS_BASE="file://$W/pub" bash "$A/local.sh" ) > "$W/log" 2>&1
+c2="$(grep -o 'cache=.*' "$W/log")"
+check "two checkouts get two lint caches, under the tools-actions cache" '[ -n "$c1" ] && [ "$c1" != "$c2" ] && case "$c1" in "cache=$W/cache/tools-actions/"*) true;; *) false;; esac'
+( cd "$repo" && env GOLANGCI_LINT_CACHE=/mine PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" TOOLS_ACTIONS_BASE="file://$W/pub" bash "$A/local.sh" ) > "$W/log" 2>&1
+check "a GOLANGCI_LINT_CACHE you set is kept" 'grep -q "cache=/mine" "$W/log"'
+
 echo; echo "passed $pass, failed $failn"
 [ "$failn" -eq 0 ]

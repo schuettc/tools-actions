@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: schuettc/tools-actions/go-ci@v0.5.0
+      - uses: schuettc/tools-actions/go-ci@v0.6.0
 ```
 
 ## The same gate locally
@@ -35,5 +35,17 @@ gate:
     [ -f "$f" ] || { mkdir -p "$(dirname "$f")"; curl -fsSL "https://raw.githubusercontent.com/schuettc/tools-actions/$v/go-ci/local.sh" -o "$f"; }
     bash "$f"
 ```
+
+## Repo layouts the gate handles
+
+- **Go source under `node_modules`** (an npm dependency can ship some) is left
+  out of vet, lint, test and build when `packages` is `./...`.
+- **Worktrees of a bare repository** (galley's layout) build: the gate sets
+  `-buildvcs=false`, since versions are stamped through `-ldflags`.
+- **A golangci-lint that logs an error fails the gate**, even if it reports
+  "0 issues": it may not have loaded the code.
+- **Locally, each checkout gets its own golangci-lint cache** (worktrees of one
+  module otherwise report each other's findings). Set `GOLANGCI_LINT_CACHE` to
+  override.
 
 Inputs: `packages` (default `./...`), `race`, `targets`, `lint`, `setup-go`, `go-version-file`.
