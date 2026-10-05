@@ -81,7 +81,7 @@ jobs:
   sync:
     runs-on: ubuntu-26.04
     steps:
-      - uses: schuettc/tools-actions/fork-sync@v0.10.3
+      - uses: schuettc/tools-actions/fork-sync@v0.10.4
         with:
           upstream_repo: "example-org/widget"
           upstream_branch: "main"

@@ -78,6 +78,19 @@ T
 run "$W/m"; rc=$?
 check "a failing test fails" '[ $rc -ne 0 ] && grep -q "boom" "$W/log"'
 
+# A required gate must run every test. With a warm build cache Go replays a
+# passing package's earlier result and prints "(cached)" instead of running it.
+mkmod "$W/m" "$clean"
+cat > "$W/m/cmd/x/main_test.go" <<'T'
+package main
+
+import "testing"
+
+func TestPasses(t *testing.T) {}
+T
+run "$W/m"; run "$W/m"; rc=$?
+check "a second run runs the tests again (no cached results)" '[ $rc -eq 0 ] && grep -q "^ok .*example.com/x/cmd/x" "$W/log" && ! grep -q "(cached)" "$W/log" || { grep "^ok" "$W/log"; false; }'
+
 mkmod "$W/m" "$clean"
 mkdir -p "$W/m/node_modules/pkg" "$W/m/.worktrees/other"
 printf 'package   bad\n' > "$W/m/node_modules/pkg/x.go"; printf 'package   bad\n' > "$W/m/.worktrees/other/x.go"
