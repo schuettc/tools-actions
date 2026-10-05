@@ -5,7 +5,7 @@ The `.tools` family Go gate, one step for every Go repo:
 1. `gofmt` (ignores `node_modules`, `.worktrees`, `vendor`)
 2. `go vet`
 3. `golangci-lint` v2.14.0 (pinned in [`golangci-lint.lock`](golangci-lint.lock), checksum-verified). `config verify` runs first, because a config golangci-lint cannot parse falls back silently and lints nothing. The repo's `.golangci.yml` wins; otherwise the family default ([`golangci.yml`](golangci.yml): the standard linters).
-4. `go test -race`
+4. `go test -count=1 -race`: every test runs on every gate. Without `-count=1`, a warm build cache (setup-go's in CI, yours locally) lets Go replay a passing package's earlier result as `(cached)`, and the required check stops running those tests.
 5. `CGO_ENABLED=0 go build` for darwin/linux × arm64/amd64
 
 ```yaml
@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: schuettc/tools-actions/go-ci@v0.10.3
+      - uses: schuettc/tools-actions/go-ci@v0.10.4
 ```
 
 ## The same gate locally

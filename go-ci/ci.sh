@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The family Go gate, in order: gofmt, go vet, golangci-lint (config verified
 # first, because a config golangci-lint cannot parse falls back silently and
-# lints nothing), go test (-race), and a CGO_ENABLED=0 build per release target.
+# lints nothing), go test (-race, -count=1: never cached), and a CGO_ENABLED=0 build per release target.
 #
 # Env: PACKAGES (default ./..., minus anything under node_modules), RACE (true|false), TARGETS, FAMILY_CONFIG
 #      (used when the repo has no .golangci.yml/.golangci.yaml), SKIP_LINT.
@@ -58,8 +58,11 @@ fi
 
 step "go test"
 race=(); [ "${RACE:-true}" = true ] && race=(-race)
+# -count=1: a required gate must run every test. A warm build cache (setup-go's,
+# or yours locally) enables Go's test-result cache, which replays a passing
+# package's earlier result as "(cached)" instead of running its tests.
 # shellcheck disable=SC2086
-go test ${race[@]+"${race[@]}"} $pkgs
+go test -count=1 ${race[@]+"${race[@]}"} $pkgs
 end
 
 step "cross-build"
