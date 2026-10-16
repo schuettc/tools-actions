@@ -1,4 +1,4 @@
-# fork-sync — the standard for `@schuettc/*` republished forks
+# fork-sync — the standard for `@subaud-tools/*` republished forks
 
 When we need a change in a third-party package before upstream merges it, we
 fork, patch, and republish under our npm scope. This composite action is the
@@ -8,7 +8,7 @@ silently (see tools-ops
 `docs/superpowers/specs/2026-09-22-fork-publish-sync-audit.md`).
 
 A fork carries **only a pinned caller**, `.github/workflows/upstream-sync.yml`,
-which calls `schuettc/tools-actions/fork-sync@vX.Y.Z`. The sync script
+which calls `subaud-tools/tools-actions/fork-sync@vX.Y.Z`. The sync script
 ([`upstream-sync.sh`](upstream-sync.sh)) lives here, beside
 [`action.yml`](action.yml), and runs from `$GITHUB_ACTION_PATH`. Dependabot
 bumps the pin in each fork when this repo releases.
@@ -18,22 +18,22 @@ bumps the pin in each fork when this repo releases.
 
 ## Naming
 
-- **`@schuettc/<name>`** is only for our patched builds of **someone else's**
+- **`@subaud-tools/<name>`** is only for our patched builds of **someone else's**
   package. Upstream owns `<name>`; the scope marks it as our fork.
 - **Packages we own are published unscoped** (`pi-bang`, `pi-wakeup`,
-  `pi-tmux-bridge`, ...). Never put an original package under `@schuettc`.
+  `pi-tmux-bridge`, ...). Never put an original package under `@subaud-tools`.
 
 ## The model
 
-- **`schuettc-publish`** is the fork's default branch = upstream + our genuine
+- **`publish`** is the fork's default branch = upstream + our genuine
   source patches + the caller workflow (and its Dependabot config). It carries
   **no packaging metadata**: upstream's `name`, `version`, `repository`,
   lockfile and changelog stay untouched, so upstream's every-release churn
   never conflicts with us.
-- **`upstream-sync`** (daily, and on demand) checks out `schuettc-publish` with
+- **`upstream-sync`** (daily, and on demand) checks out `publish` with
   full history, rebases onto upstream, runs `test_cmd`, runs `build_cmd`,
   copies the package to an isolated directory, stamps the scoped name /
-  `<upstream-version>-schuettc.N` / repo URLs there, and publishes via **npm
+  `<upstream-version>-subaud-tools.N` / repo URLs there, and publishes via **npm
   OIDC trusted publishing** with provenance. Then it force-pushes the rebased
   branch and tags `<tag_prefix><version>`.
 - **Anything wrong fails loud**: a rebase conflict, a test failure, a build or
@@ -48,12 +48,12 @@ bumps the pin in each fork when this repo releases.
   extensions import the upstream package *by name* (`@gotgenes/pi-permission-system`
   is imported by pi-auto-review and pi-hail), install the fork under that name
   with an npm alias instead of changing every consumer:
-  `npm:<upstream-name>@npm:<@schuettc/name>@<version>`. pi and kempt pass the
+  `npm:<upstream-name>@npm:<@subaud-tools/name>@<version>`. pi and kempt pass the
   spec through to `npm install`; the fork lands at
   `node_modules/<upstream-name>` (the only copy), consumers' imports resolve to
   it, and the upstream package can't also be loaded (same path). Retiring is
   one string: pin the upstream spec again. Peer ranges don't enforce the fork
-  (pi installs with `--legacy-peer-deps`, and `x.y.z-schuettc.N` satisfies no
+  (pi installs with `--legacy-peer-deps`, and `x.y.z-subaud-tools.N` satisfies no
   range), so a consumer that needs a fork-only capability checks for it at
   runtime.
 - **Only `upstream-sync` runs unattended on a fork.** Upstream's scheduled,
@@ -81,11 +81,11 @@ jobs:
   sync:
     runs-on: ubuntu-26.04
     steps:
-      - uses: schuettc/tools-actions/fork-sync@v0.10.4
+      - uses: subaud-tools/tools-actions/fork-sync@v0.11.0
         with:
           upstream_repo: "example-org/widget"
           upstream_branch: "main"
-          pkg_name: "@schuettc/widget"
+          pkg_name: "@subaud-tools/widget"
           pkg_dir: "."
           tag_prefix: "v"
           test_cmd: "npm ci && npm test"
@@ -101,7 +101,7 @@ What each fork fills in:
   own minute so the forks don't all run at once.
 - **`upstream_repo`** / **`upstream_branch`**: what we track, `owner/name` and a
   branch (`main`, `master`, ...).
-- **`pkg_name`**: the published name, `@schuettc/<upstream-name>`.
+- **`pkg_name`**: the published name, `@subaud-tools/<upstream-name>`.
 - **`pkg_dir`**: the package directory relative to the repo root, `.` for a
   root package, `packages/<pkg>` in a monorepo.
 - **`tag_prefix`**: the release tag prefix, `v` or `<pkg>-v` in a monorepo.
@@ -124,7 +124,7 @@ Keep the rest verbatim:
 |---|---|---|---|---|
 | `upstream_repo` | yes | | upstream `owner/name` | `pungggi/pi-schedule` |
 | `upstream_branch` | yes | | upstream branch to track | `master` |
-| `pkg_name` | yes | | published name | `@schuettc/pi-schedule` |
+| `pkg_name` | yes | | published name | `@subaud-tools/pi-schedule` |
 | `pkg_dir` | yes | | package dir (`.` for root) | `extensions/pi-usage` |
 | `tag_prefix` | yes | | release tag prefix | `v`, `pi-auto-review-v` |
 | `test_cmd` | yes | | installs its own deps; gates publishing | `npm ci && npm run typecheck && npm test` |
@@ -134,7 +134,7 @@ Keep the rest verbatim:
 | `dry_run` | no | `"false"` | `"true"` runs everything but publish, push, tag and issue | `${{ inputs.dry_run }}` |
 | `notify_test` | no | `"false"` | `"true"` opens and closes a test issue, then stops | `${{ inputs.notify_test }}` |
 | `node_version` | no | `"22"` | Node.js for `actions/setup-node` | `"22"` |
-| `publish_branch` | no | `schuettc-publish` | reserved for a later release: the sync script supports only `schuettc-publish`, so any other value fails the run in the first step | leave unset |
+| `publish_branch` | no | `publish` | reserved for a later release: the sync script supports only `publish`, so any other value fails the run in the first step | leave unset |
 | `token` | no | `${{ github.token }}` | checkout, push, tags and issues on the fork | |
 
 **Test on the Node users run.** `node_version` is the job's Node (npm publishing needs one). Set `test_node_versions: "current"` so `test_cmd` also runs on the newest Node release: pi runs on whatever Node the machine has, usually Homebrew's current release, and a fork that only passes on 22 can ship broken there (a native addon with no prebuilt binary for the new major did exactly that to pi-usage).
@@ -143,12 +143,12 @@ Keep the rest verbatim:
   `false` for anything else (including the empty string a schedule run passes).
 - `build_cmd` reaches the script as-is: `""` means no build step.
 - `publish_branch` is reserved. `upstream-sync.sh` pushes and tags
-  `schuettc-publish` by name, so checking out any other branch would rebase it
-  and force-push it over `schuettc-publish`. The action's first step fails with
-  an `::error::` unless the value is `schuettc-publish`.
-- The action always checks out `schuettc-publish` with full history, whatever
+  `publish` by name, so checking out any other branch would rebase it
+  and force-push it over `publish`. The action's first step fails with
+  an `::error::` unless the value is `publish`.
+- The action always checks out `publish` with full history, whatever
   ref the workflow was dispatched from. A `dry_run` dispatched from a PR branch
-  therefore still exercises `schuettc-publish`, using the action at the pin on
+  therefore still exercises `publish`, using the action at the pin on
   that branch.
 
 The publish copy runs with `--ignore-scripts` (upstream `prepublishOnly`/`prepack`
@@ -168,7 +168,7 @@ committed lockfile changes out of the patch: if our patch adds a dependency, use
 
 | Path | Role |
 |---|---|
-| `action.yml` | The composite action: the `publish_branch` guard, checkout of `schuettc-publish`, setup-node, npm upgrade, then the script. |
+| `action.yml` | The composite action: the `publish_branch` guard, checkout of `publish`, setup-node, npm upgrade, then the script. |
 | `upstream-sync.sh` | The sync script, run from `$GITHUB_ACTION_PATH`. Forks never carry a copy. |
 | `first-publish.sh` | Builds a new fork's first-publish tarball the way CI would and prints the one publish command. |
 | `tests/test.sh` | Hermetic tests for the script and `first-publish.sh` (synthetic repos, npm/gh shims). |
@@ -183,7 +183,7 @@ committed lockfile changes out of the patch: if our patch adds a dependency, use
 ## Onboarding a new fork
 
 1. `gh repo fork <upstream> --clone=false`; push our patch commits onto a
-   `schuettc-publish` branch based on upstream's default branch.
+   `publish` branch based on upstream's default branch.
 2. Add the caller (above) as `.github/workflows/upstream-sync.yml`, with the
    fork's values and the newest tools-actions tag. Add `.github/dependabot.yml`:
 
@@ -192,11 +192,11 @@ committed lockfile changes out of the patch: if our patch adds a dependency, use
    updates:
      - package-ecosystem: github-actions
        directory: /
-       target-branch: schuettc-publish
+       target-branch: publish
        schedule: { interval: weekly }
        cooldown: { default-days: 3 }
        allow:
-         - dependency-name: "schuettc/tools-actions"
+         - dependency-name: "subaud-tools/tools-actions"
    ```
 
    Only `github-actions`: an `npm` entry would open PRs against upstream's
@@ -205,7 +205,7 @@ committed lockfile changes out of the patch: if our patch adds a dependency, use
    fork's workflow files, including upstream's own disabled workflows
    (ci.yml, publish.yml, …), and each such bump becomes a fork patch that
    conflicts on rebase. Commit both as a `ci:` commit and push.
-3. Repo settings: `gh api -X PATCH repos/<fork> -f default_branch=schuettc-publish -F has_issues=true`;
+3. Repo settings: `gh api -X PATCH repos/<fork> -f default_branch=publish -F has_issues=true`;
    enable Actions (`gh api -X PUT repos/<fork>/actions/permissions -F enabled=true -f allowed_actions=all`);
    `gh workflow disable` each upstream scheduled/tag/publish workflow.
 
@@ -239,7 +239,7 @@ committed lockfile changes out of the patch: if our patch adds a dependency, use
    single-quoted and block scalar forms aren't supported and may produce a bad package name. The operator only logs in
    (`npm login`, if `npm whoami` fails) and runs that `npm publish` line. Then add the trusted publisher in the npmjs.com UI
    (package → Settings; the `npm trust` CLI returned an opaque 400 for us):
-   user `schuettc`, repo `<fork>`, workflow `upstream-sync.yml`,
+   user `subaud-tools`, repo `<fork>`, workflow `upstream-sync.yml`,
    **environment empty**, permission **npm publish** (not staged publish). A
    package allows one publisher; replace an old one rather than adding.
 
@@ -253,7 +253,7 @@ committed lockfile changes out of the patch: if our patch adds a dependency, use
 
 Forks rendered by the old kit (muda `fork-sync`, or tools-ops
 `templates/fork-sync`) carry their own `.github/scripts/upstream-sync.sh`. Move
-each one to the caller with one `ci:` PR into `schuettc-publish`:
+each one to the caller with one `ci:` PR into `publish`:
 
 1. Replace `.github/workflows/upstream-sync.yml` with the caller above, at the
    newest tools-actions tag. Carry the fork's current `env:` values into `with:`
@@ -262,8 +262,8 @@ each one to the caller with one `ci:` PR into `schuettc-publish`:
    npm's trusted publisher names it.
 2. Delete `.github/scripts/upstream-sync.sh` and `.copier-answers.fork-sync.yml`.
 3. Add `.github/dependabot.yml` (onboarding step 2): `github-actions` only,
-   `target-branch: schuettc-publish`, with the `allow` entry restricting it to
-   `schuettc/tools-actions`.
+   `target-branch: publish`, with the `allow` entry restricting it to
+   `subaud-tools/tools-actions`.
 4. Before merging, dispatch a dry run from the PR branch:
    `gh workflow run upstream-sync.yml -R <fork> --ref <pr-branch> -f dry_run=true`.
    The run must be green, and its log must show the rebase, `test_cmd`,
@@ -309,10 +309,10 @@ upstream bump) needs a `force=true` dispatch to publish.
 ## Retiring a fork (upstream merged our change)
 
 1. Confirm the upstream release contains everything in our patch
-   (`git log upstream/<branch>..schuettc-publish` shows only `ci:` commits).
+   (`git log upstream/<branch>..publish` shows only `ci:` commits).
 2. Point `dotfiles/kempt.toml` back at the upstream package + version; `kempt update`.
 3. `gh workflow disable upstream-sync.yml -R <fork>`; mark the row `retired` in
-   tools-ops' `forks.tsv`; optionally `npm deprecate <@schuettc/name> "use <upstream-name>"`
+   tools-ops' `forks.tsv`; optionally `npm deprecate <@subaud-tools/name> "use <upstream-name>"`
    and archive the repo.
 
 ## The house rule

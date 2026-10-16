@@ -62,7 +62,7 @@ chmod +x "$W/bin/npm" "$W/bin/gh"
 git_q() { git -c init.defaultBranch=main -c user.name=t -c user.email=t@t "$@" >/dev/null 2>&1; }
 
 # setup <name> <pkg_dir>: upstream repo (served as a file URL), fork clone with
-# one source patch + CI on schuettc-publish, bare origin.
+# one source patch + CI on publish, bare origin.
 setup() {
   local name="$1" dir="$2" pj
   S="$W/$name"; rm -rf "$S"; mkdir -p "$S"
@@ -72,10 +72,10 @@ setup() {
   printf 'line1\nline2\nline3\n' > "$S/up/${dir:+$dir/}src.txt"
   git_q add -A && git_q commit -m "up 1.0.0"
   git_q clone --bare "$S/up" "$S/origin.git"
-  git_q clone "$S/origin.git" "$S/fork" && cd "$S/fork" && git_q checkout -b schuettc-publish
+  git_q clone "$S/origin.git" "$S/fork" && cd "$S/fork" && git_q checkout -b publish
   printf 'line1\nOUR PATCH\nline3\n' > "${dir:+$dir/}src.txt"
   mkdir -p .github/scripts && cp "$SCRIPT" .github/scripts/upstream-sync.sh
-  git_q add -A && git_q commit -m "our patch + CI" && git_q push origin schuettc-publish
+  git_q add -A && git_q commit -m "our patch + CI" && git_q push origin publish
 }
 upstream_bump() { # <dir> <version> <conflict:0|1>
   local dir="$1" ver="$2" conflict="$3" p
@@ -87,8 +87,8 @@ upstream_bump() { # <dir> <version> <conflict:0|1>
 run() { # env... -> runs the script in the fork; sets RC and OUT
   export SHIM_LOG="$S/shim.log" SHIM_DIR="$S"; : > "$SHIM_LOG"; rm -f "$S/published-package.json" "$S/published-dist.js"
   cd "$S/fork" || exit 1
-  OUT="$(env PATH="$W/bin:$PATH" GITHUB_REPOSITORY=schuettc/fork GITHUB_REPOSITORY_OWNER=schuettc \
-      GITHUB_RUN_ID=1 UPSTREAM_REPO=ignored UPSTREAM_BRANCH=main PKG_NAME=@schuettc/pkg TAG_PREFIX=v \
+  OUT="$(env PATH="$W/bin:$PATH" GITHUB_REPOSITORY=subaud-tools/fork GITHUB_REPOSITORY_OWNER=subaud-tools \
+      GITHUB_RUN_ID=1 UPSTREAM_REPO=ignored UPSTREAM_BRANCH=main PKG_NAME=@subaud-tools/pkg TAG_PREFIX=v \
       "$@" bash -c 'git remote add upstream "file://$UP_PATH" 2>/dev/null; sed "s#https://github.com/\${UPSTREAM_REPO}.git#file://$UP_PATH#g" .github/scripts/upstream-sync.sh > /tmp/us-$$.sh; bash /tmp/us-$$.sh; rc=$?; rm -f /tmp/us-$$.sh; exit $rc' 2>&1)"
   RC=$?
 }
@@ -105,16 +105,19 @@ for variant in root mono; do
 
   setup "$variant-clean" "$D"; export UP_PATH="$S/up"
   upstream_bump "$D" 1.1.0 0
-  run PKG_DIR="$PKG_DIR_ENV" NPM_PUBLISHED='["1.1.0-schuettc.1"]'
+  # The old -schuettc.N suffix is a different series: it never counts toward N.
+  run PKG_DIR="$PKG_DIR_ENV" NPM_PUBLISHED='["1.1.0-schuettc.7","1.1.0-subaud-tools.1"]'
   check "clean rebase: exit 0" '[ $RC -eq 0 ]'
-  check "publishes next N (1.1.0-schuettc.2)" '[ "$(pub_field .version)" = "\"1.1.0-schuettc.2\"" ]'
-  check "stamps scoped name" '[ "$(pub_field .name)" = "\"@schuettc/pkg\"" ]'
-  check "stamps fork repo url" 'grep -q "github.com/schuettc/fork.git" <<<"$(pub_field .repository)"'
+  check "publishes next N (1.1.0-subaud-tools.2), ignoring -schuettc.N" '[ "$(pub_field .version)" = "\"1.1.0-subaud-tools.2\"" ]'
+  check "commits as subaud-tools-fork-bot" '[ "$(git -C "$S/origin.git" log -1 --format=%cn publish)" = subaud-tools-fork-bot ]'
+  check "stamps scoped name" '[ "$(pub_field .name)" = "\"@subaud-tools/pkg\"" ]'
+  check "stamps fork repo url" 'grep -q "github.com/subaud-tools/fork.git" <<<"$(pub_field .repository)"'
   if [ -n "$D" ]; then check "monorepo directory field" 'grep -q "packages/pkg" <<<"$(pub_field .repository)"'; fi
-  check "branch keeps upstream name/version" '[ "$(git -C "$S/origin.git" show schuettc-publish:${D:+$D/}package.json | node -pe "JSON.parse(require(\"fs\").readFileSync(0)).name")" = "upstream-pkg" ]'
-  check "branch pushed rebased (has upstream 1.1.0)" 'git -C "$S/origin.git" show schuettc-publish:${D:+$D/}package.json | grep -q 1.1.0'
-  check "patch preserved on branch" 'git -C "$S/origin.git" show schuettc-publish:${D:+$D/}src.txt | grep -q "OUR PATCH"'
-  check "tag pushed" 'git -C "$S/origin.git" rev-parse -q --verify refs/tags/v1.1.0-schuettc.2 >/dev/null'
+  if [ -n "$D" ]; then check "monorepo homepage under /tree/publish/" '[ "$(pub_field .homepage)" = "\"https://github.com/subaud-tools/fork/tree/publish/packages/pkg#readme\"" ]'; fi
+  check "branch keeps upstream name/version" '[ "$(git -C "$S/origin.git" show publish:${D:+$D/}package.json | node -pe "JSON.parse(require(\"fs\").readFileSync(0)).name")" = "upstream-pkg" ]'
+  check "branch pushed rebased (has upstream 1.1.0)" 'git -C "$S/origin.git" show publish:${D:+$D/}package.json | grep -q 1.1.0'
+  check "patch preserved on branch" 'git -C "$S/origin.git" show publish:${D:+$D/}src.txt | grep -q "OUR PATCH"'
+  check "tag pushed" 'git -C "$S/origin.git" rev-parse -q --verify refs/tags/v1.1.0-subaud-tools.2 >/dev/null'
   check "publishes with --ignore-scripts + provenance" 'grep -E "npm publish .*--provenance.*--ignore-scripts" "$SHIM_LOG" >/dev/null'
 
   setup "$variant-build" "$D"; export UP_PATH="$S/up"
@@ -177,23 +180,23 @@ for variant in root mono; do
   check "TEST_CMD fails: nonzero exit" '[ $RC -ne 0 ]'
   check "TEST_CMD fails: nothing published" '! grep -q "npm publish" "$SHIM_LOG"'
   check "TEST_CMD fails: issue names test phase" 'grep -q "phase.*test" "$SHIM_LOG"'
-  check "TEST_CMD fails: branch not pushed" '! git -C "$S/origin.git" show schuettc-publish:${D:+$D/}package.json | grep -q 1.6.0'
+  check "TEST_CMD fails: branch not pushed" '! git -C "$S/origin.git" show publish:${D:+$D/}package.json | grep -q 1.6.0'
 
   setup "$variant-conflict" "$D"; export UP_PATH="$S/up"
   upstream_bump "$D" 1.2.0 1
   run PKG_DIR="$PKG_DIR_ENV"
   check "conflict: exit 1" '[ $RC -eq 1 ]'
   check "conflict: nothing published" '! grep -q "npm publish" "$SHIM_LOG"'
-  check "conflict: issue on the FORK (-R)" 'grep -E "gh issue create .*-R schuettc/fork" "$SHIM_LOG" >/dev/null'
-  check "conflict: issue @mentions owner" 'grep -q "cc\\ @schuettc\|cc @schuettc" "$SHIM_LOG"'
-  check "conflict: branch untouched" '! git -C "$S/origin.git" show schuettc-publish:${D:+$D/}package.json | grep -q 1.2.0'
+  check "conflict: issue on the FORK (-R)" 'grep -E "gh issue create .*-R subaud-tools/fork" "$SHIM_LOG" >/dev/null'
+  check "conflict: issue @mentions owner" 'grep -q "cc\\ @subaud-tools\|cc @subaud-tools" "$SHIM_LOG"'
+  check "conflict: branch untouched" '! git -C "$S/origin.git" show publish:${D:+$D/}package.json | grep -q 1.2.0'
 
   setup "$variant-pubfail" "$D"; export UP_PATH="$S/up"
   upstream_bump "$D" 1.3.0 0
   run PKG_DIR="$PKG_DIR_ENV" NPM_PUBLISH_FAIL=1
   check "publish failure: nonzero exit" '[ $RC -ne 0 ]'
   check "publish failure: issue names phase" 'grep -q "phase.*publish" "$SHIM_LOG"'
-  check "publish failure: branch not pushed" '! git -C "$S/origin.git" show schuettc-publish:${D:+$D/}package.json | grep -q 1.3.0'
+  check "publish failure: branch not pushed" '! git -C "$S/origin.git" show publish:${D:+$D/}package.json | grep -q 1.3.0'
   check "publish failure: exactly ONE issue filed" '[ "$(grep -c "^gh issue create" "$SHIM_LOG")" = 1 ]'
   check "issue dedupe uses list, not search" '! grep -q -- "--search" "$SHIM_LOG"'
 
@@ -208,11 +211,12 @@ setup dry-sync ""; export UP_PATH="$S/up"
 run PKG_DIR=. DRY_RUN=true TEST_CMD="touch $S/tested"
 check "dry run in sync: still tests + packs" '[ $RC -eq 0 ] && [ -f "$S/tested" ] && grep -q "npm pack --dry-run" "$SHIM_LOG"'
 setup dry-ahead ""; export UP_PATH="$S/up"; upstream_bump "" 2.0.0 0
-run PKG_DIR=. DRY_RUN=true
-check "dry run: exit 0" '[ $RC -eq 0 ] && grep -q "DRY RUN OK: would publish @schuettc/pkg@2.0.0-schuettc.1" <<<"$OUT"'
-check "dry run: packed copy is stamped" 'grep -q "@schuettc/pkg" "$S/packed-package.json"'
+# Only -schuettc.N exists for 2.0.0: the first -subaud-tools version is .1.
+run PKG_DIR=. DRY_RUN=true NPM_PUBLISHED='["2.0.0-schuettc.3"]'
+check "dry run: exit 0" '[ $RC -eq 0 ] && grep -q "DRY RUN OK: would publish @subaud-tools/pkg@2.0.0-subaud-tools.1" <<<"$OUT"'
+check "dry run: packed copy is stamped" 'grep -q "@subaud-tools/pkg" "$S/packed-package.json"'
 check "dry run: no publish" '! grep -q "npm publish" "$SHIM_LOG"'
-check "dry run: branch not pushed, no tag" '! git -C "$S/origin.git" show schuettc-publish:package.json | grep -q 2.0.0 && ! git -C "$S/origin.git" rev-parse -q --verify refs/tags/v2.0.0-schuettc.1 >/dev/null'
+check "dry run: branch not pushed, no tag" '! git -C "$S/origin.git" show publish:package.json | grep -q 2.0.0 && ! git -C "$S/origin.git" rev-parse -q --verify refs/tags/v2.0.0-subaud-tools.1 >/dev/null'
 setup dry-conflict ""; export UP_PATH="$S/up"; upstream_bump "" 2.1.0 1
 run PKG_DIR=. DRY_RUN=true
 check "dry run conflict: exit 1, no issue filed" '[ $RC -eq 1 ] && ! grep -q "gh issue" "$SHIM_LOG"'
@@ -224,20 +228,21 @@ echo "== notify_test"
 setup notify ""; export UP_PATH="$S/up"
 run PKG_DIR=. NOTIFY_TEST=true
 check "notify: exit 0" '[ $RC -eq 0 ]'
-check "notify: create then close on fork" 'grep -q "gh issue create .*-R schuettc/fork" "$SHIM_LOG" && grep -q "gh issue close .*-R schuettc/fork" "$SHIM_LOG"'
+check "notify: create then close on fork" 'grep -q "gh issue create .*-R subaud-tools/fork" "$SHIM_LOG" && grep -q "gh issue close .*-R subaud-tools/fork" "$SHIM_LOG"'
 check "notify: no fetch/publish" '! grep -q "npm publish" "$SHIM_LOG"'
 
 echo "== --stamp (shared with first-publish.sh)"
 sd="$(mktemp -d)"
 printf '{"name":"up-name","version":"1.2.3","private":true,"repository":"x"}\n' > "$sd/package.json"
-PKG_NAME=@schuettc/up-name VER=1.2.3-schuettc.1 FORK=schuettc/up-name DIR_FIELD=packages/up \
+PKG_NAME=@subaud-tools/up-name VER=1.2.3-subaud-tools.1 FORK=subaud-tools/up-name DIR_FIELD=packages/up \
   bash "$SCRIPT_KIT" --stamp "$sd/package.json" >/dev/null 2>&1; rc=$?
 check "stamp exits 0" '[ "$rc" = 0 ]'
-check "stamp sets name" '[ "$(node -pe "require(\"$sd/package.json\").name")" = @schuettc/up-name ]'
-check "stamp sets version" '[ "$(node -pe "require(\"$sd/package.json\").version")" = 1.2.3-schuettc.1 ]'
-check "stamp sets repo + directory" '[ "$(node -pe "const r=require(\"$sd/package.json\").repository; r.url+\" \"+r.directory")" = "git+https://github.com/schuettc/up-name.git packages/up" ]'
+check "stamp sets name" '[ "$(node -pe "require(\"$sd/package.json\").name")" = @subaud-tools/up-name ]'
+check "stamp sets version" '[ "$(node -pe "require(\"$sd/package.json\").version")" = 1.2.3-subaud-tools.1 ]'
+check "stamp sets homepage under /tree/publish/" '[ "$(node -pe "require(\"$sd/package.json\").homepage")" = "https://github.com/subaud-tools/up-name/tree/publish/packages/up#readme" ]'
+check "stamp sets repo + directory" '[ "$(node -pe "const r=require(\"$sd/package.json\").repository; r.url+\" \"+r.directory")" = "git+https://github.com/subaud-tools/up-name.git packages/up" ]'
 check "stamp drops private" '[ "$(node -pe "String(require(\"$sd/package.json\").private)")" = undefined ]'
-env -u VER PKG_NAME=@schuettc/up-name FORK=schuettc/up-name bash "$SCRIPT_KIT" --stamp "$sd/package.json" >/dev/null 2>&1; rc=$?
+env -u VER PKG_NAME=@subaud-tools/up-name FORK=subaud-tools/up-name bash "$SCRIPT_KIT" --stamp "$sd/package.json" >/dev/null 2>&1; rc=$?
 check "stamp without VER fails" '[ "$rc" != 0 ]'
 rm -rf "$sd"
 
@@ -252,11 +257,11 @@ jobs:
   sync:
     runs-on: ubuntu-26.04
     steps:
-      - uses: schuettc/tools-actions/fork-sync@v0.1.0
+      - uses: subaud-tools/tools-actions/fork-sync@v0.1.0
         with:
           upstream_repo: "x/y"
           upstream_branch: "main"
-          pkg_name: "@schuettc/pkg"
+          pkg_name: "@subaud-tools/pkg"
           pkg_dir: "packages/pkg"
           tag_prefix: "v"
           test_cmd: "touch $S/tested"
@@ -264,15 +269,15 @@ jobs:
           force: \${{ inputs.force }}
 EOF
 node -e 'const f="packages/pkg/package.json",p=JSON.parse(require("fs").readFileSync(f));p.publishConfig={access:"public",provenance:true};require("fs").writeFileSync(f,JSON.stringify(p,null,2)+"\n")'
-git_q add -A && git_q commit -m "ci workflow" && git_q push origin schuettc-publish
+git_q add -A && git_q commit -m "ci workflow" && git_q push origin publish
 fp_run() { export SHIM_LOG="$S/shim.log" SHIM_DIR="$S"; : > "$SHIM_LOG"; rm -f "$S/packed-package.json" "$S/tested" "$S/built"
-  OUT="$(env PATH="$W/bin:$PATH" FORK=schuettc/fork "$@" bash "$HERE/../first-publish.sh" "$S/fork" "$S/out" 2>&1)"; RC=$?; }
+  OUT="$(env PATH="$W/bin:$PATH" FORK=subaud-tools/fork "$@" bash "$HERE/../first-publish.sh" "$S/fork" "$S/out" 2>&1)"; RC=$?; }
 fp_run NPM_VIEW_404=1
 packed() { node -pe "JSON.stringify(require('$S/packed-package.json')$1)"; }
 check "first-publish exits 0" '[ "$RC" = 0 ]'
 check "first-publish runs TEST_CMD and BUILD_CMD" '[ -f "$S/tested" ] && [ -f "$S/built" ]'
-check "first-publish stamps name + -schuettc.1" '[ "$(packed .name)" = "\"@schuettc/pkg\"" ] && [ "$(packed .version)" = "\"1.0.0-schuettc.1\"" ]'
-check "first-publish stamps the fork repo" '[ "$(packed .repository.url)" = "\"git+https://github.com/schuettc/fork.git\"" ]'
+check "first-publish stamps name + -subaud-tools.1" '[ "$(packed .name)" = "\"@subaud-tools/pkg\"" ] && [ "$(packed .version)" = "\"1.0.0-subaud-tools.1\"" ]'
+check "first-publish stamps the fork repo" '[ "$(packed .repository.url)" = "\"git+https://github.com/subaud-tools/fork.git\"" ]'
 check "first-publish strips provenance, keeps access" '[ "$(packed .publishConfig)" = "{\"access\":\"public\"}" ]'
 check "first-publish prints the publish command" 'echo "$OUT" | grep -q "npm publish .*--access public --ignore-scripts --tag latest"'
 check "first-publish never publishes" '! grep -q "^npm publish" "$S/shim.log"'

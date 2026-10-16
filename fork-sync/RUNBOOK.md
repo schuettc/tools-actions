@@ -12,26 +12,26 @@ situation, with the trigger, the steps, and how you know it worked.
 
 | Fork | Local checkout (remotes) | Upstream | Package dir | Tag prefix | Cron (UTC) |
 |---|---|---|---|---|---|
-| `schuettc/pi-claude-bridge` | `~/GitHub/worktrees/pi-claude-bridge-current` (**`origin` = upstream elidickinson**, `schuettc` = fork, `karrq`) | `elidickinson/pi-claude-bridge@main` | `.` | `v` | 09:17 |
-| `schuettc/pi-packages` → `@schuettc/pi-auto-review` | `~/GitHub/schuettc/pi-packages` (`origin` = fork, `upstream`) | `erichll/pi-packages@main` | `packages/pi-auto-review` | `pi-auto-review-v` | 09:23 |
-| `schuettc/pi-schedule` | `tools-workspace/pi-schedule` (`origin` = fork, `upstream`) | `pungggi/pi-schedule@master` | `.` | `v` | 09:29 |
-| `schuettc/pi-permission-system` | `tools-workspace/pi-permission-system` (`origin` = fork, `upstream`) | `gotgenes/pi-packages@main` | `packages/pi-permission-system` | `pi-permission-system-v` | 09:35 |
-| `schuettc/pi-usage` | none kept; clone fresh (see below) | `Sreetej510/pi-extensions@master` | `extensions/pi-usage` | `pi-usage-v` | 09:41 |
+| `subaud-tools/pi-claude-bridge` | `~/GitHub/worktrees/pi-claude-bridge-current` (**`origin` = upstream elidickinson**, `schuettc` = fork, `karrq`) | `elidickinson/pi-claude-bridge@main` | `.` | `v` | 09:17 |
+| `subaud-tools/pi-packages` → `@subaud-tools/pi-auto-review` | `~/GitHub/subaud-tools/pi-packages` (`origin` = fork, `upstream`) | `erichll/pi-packages@main` | `packages/pi-auto-review` | `pi-auto-review-v` | 09:23 |
+| `subaud-tools/pi-schedule` | `tools-workspace/pi-schedule` (`origin` = fork, `upstream`) | `pungggi/pi-schedule@master` | `.` | `v` | 09:29 |
+| `subaud-tools/pi-permission-system` | `tools-workspace/pi-permission-system` (`origin` = fork, `upstream`) | `gotgenes/pi-packages@main` | `packages/pi-permission-system` | `pi-permission-system-v` | 09:35 |
+| `subaud-tools/pi-usage` | none kept; clone fresh (see below) | `Sreetej510/pi-extensions@master` | `extensions/pi-usage` | `pi-usage-v` | 09:41 |
 
-Each fork's package is `@schuettc/<fork name>`, except `pi-packages`, which
-publishes `@schuettc/pi-auto-review`. The fleet list is tools-ops'
+Each fork's package is `@subaud-tools/<fork name>`, except `pi-packages`, which
+publishes `@subaud-tools/pi-auto-review`. The fleet list is tools-ops'
 `templates/fork-sync/forks.tsv`.
 
 > **Upstream-owned `dependabot.yml`: `pi-permission-system` keeps Dependabot
 > disabled.** Overwriting an upstream-owned `.github/dependabot.yml` would put
 > a standing conflict into every rebase, but upstream's file isn't scoped the
-> way ours is: it has no `allow` restricting it to our `schuettc/tools-actions`
+> way ours is: it has no `allow` restricting it to our `subaud-tools/tools-actions`
 > pin, so enabling Dependabot version updates on this fork (Settings → Code
 > security) would also open PRs bumping upstream's own workflows — the same
 > fork-patch-per-bump problem the `allow` restriction on our own
 > `dependabot.yml` exists to avoid. Leave Dependabot **off** for this fork
 > (forks have it off by default; never click "Enable"). Instead, bump its
-> `schuettc/tools-actions/fork-sync@vX.Y.Z` pin by hand whenever `muda check
+> `subaud-tools/tools-actions/fork-sync@vX.Y.Z` pin by hand whenever `muda check
 > fork-sync` warns it's stale, the same way you would for an urgent fix on any
 > other fork (see "changing the standard itself" below).
 
@@ -42,10 +42,10 @@ publishes `@schuettc/pi-auto-review`. The fleet list is tools-ops'
 Fresh clone of any fork, standard remote layout:
 
 ```bash
-git clone git@github.com:schuettc/<fork>.git ~/GitHub/worktrees/<fork>-work
+git clone git@github.com:subaud-tools/<fork>.git ~/GitHub/worktrees/<fork>-work
 cd ~/GitHub/worktrees/<fork>-work
 git remote add upstream https://github.com/<upstream-owner>/<upstream-repo>.git
-git fetch upstream && git checkout schuettc-publish
+git fetch upstream && git checkout publish
 ```
 
 Health of everything, one command (fleet data stays in tools-ops, D11):
@@ -72,7 +72,7 @@ muda check fork-sync \
 2. Read the run log without the noise:
 
    ```bash
-   gh run view <run-id> -R schuettc/<fork> --log | sed 's/\x1b\[[0-9;]*m//g' \
+   gh run view <run-id> -R subaud-tools/<fork> --log | sed 's/\x1b\[[0-9;]*m//g' \
      | grep -E 'ahead of|# (pass|fail) [0-9]+|Tests +[0-9]+|publishing new version|Published @|npm error|##\[error\]'
    ```
 3. When fixed and republished, close the issue with a one-line cause. Retries
@@ -94,7 +94,7 @@ against 19 upstream) and pi-usage (22 commits → 2).
 
    ```bash
    git -C <checkout> fetch <fork-remote> && git -C <checkout> fetch upstream
-   git -C <checkout> worktree add --detach ~/GitHub/worktrees/<fork>-catchup <fork-remote>/schuettc-publish
+   git -C <checkout> worktree add --detach ~/GitHub/worktrees/<fork>-catchup <fork-remote>/publish
    ```
 2. **Look before resolving.** List our patches and upstream's new commits:
 
@@ -129,7 +129,7 @@ against 19 upstream) and pi-usage (22 commits → 2).
    replaying makes you resolve the same hunk several times. Instead:
 
    ```bash
-   git checkout -B schuettc-publish-new upstream/<branch>
+   git checkout -B publish-new upstream/<branch>
    git checkout <old-tip> -- <new files that are purely ours>
    git diff <first-kept>~1 <last-kept> -- <shared file> > /tmp/net.diff
    git apply --3way /tmp/net.diff                      # resolve the few real conflicts
@@ -149,12 +149,12 @@ against 19 upstream) and pi-usage (22 commits → 2).
 10. **Ship:**
 
    ```bash
-   git tag archive/schuettc-publish-pre-<date> <fork-remote>/schuettc-publish   # when rewriting history
-   git push <fork-remote> archive/schuettc-publish-pre-<date>
-   git push --force-with-lease=schuettc-publish:$(git rev-parse <fork-remote>/schuettc-publish) \
-     <fork-remote> HEAD:schuettc-publish
-   gh workflow run upstream-sync.yml -R schuettc/<fork> --ref schuettc-publish -f dry_run=true
-   gh workflow run upstream-sync.yml -R schuettc/<fork> --ref schuettc-publish -f force=true
+   git tag archive/publish-pre-<date> <fork-remote>/publish   # when rewriting history
+   git push <fork-remote> archive/publish-pre-<date>
+   git push --force-with-lease=publish:$(git rev-parse <fork-remote>/publish) \
+     <fork-remote> HEAD:publish
+   gh workflow run upstream-sync.yml -R subaud-tools/<fork> --ref publish -f dry_run=true
+   gh workflow run upstream-sync.yml -R subaud-tools/<fork> --ref publish -f force=true
    ```
    The branch is now rebased on upstream, so a plain run sees `ahead=0` and
    skips. Publishing the catch-up needs `force=true` (a patch-only change, with
@@ -184,7 +184,7 @@ against 19 upstream) and pi-usage (22 commits → 2).
     `.env*` files. Only the user's own shell (or `npm test`, which sources it)
     can use it.
 - **Publish dry run**, for the full CI pipeline on the real runner:
-  `gh workflow run upstream-sync.yml -R schuettc/<fork> --ref schuettc-publish -f dry_run=true`.
+  `gh workflow run upstream-sync.yml -R subaud-tools/<fork> --ref publish -f dry_run=true`.
 
 ---
 
@@ -199,13 +199,13 @@ The agent builds the tarball; the operator logs in and publishes:
 git -C <tools-actions> checkout v<pinned-version>                # agent: the tag the fork pins
 bash <tools-actions>/fork-sync/first-publish.sh <fork-checkout>  # agent: prints the command below
 npm login                                               # operator, only if `npm whoami` fails
-npm publish ~/Desktop/<pkg>-<ver>-schuettc.1.tgz --access public --ignore-scripts --tag latest
+npm publish ~/Desktop/<pkg>-<ver>-subaud-tools.1.tgz --access public --ignore-scripts --tag latest
 ```
 - `first-publish.sh` refuses when the package already exists on npm (later
   versions go through the workflow's `force` dispatch), when the checkout isn't
-  exactly `origin/schuettc-publish`, or when the working tree has changes.
+  exactly `origin/publish`, or when the working tree has changes.
 - `--tag latest` is required: npm refuses prerelease-shaped versions
-  (`x.y.z-schuettc.N`) without an explicit tag.
+  (`x.y.z-subaud-tools.N`) without an explicit tag.
 
 **Trusted publisher:** set it in the **npmjs.com UI** (package → Settings →
 Trusted Publisher → GitHub Actions). `npm trust github` returned an opaque
@@ -213,7 +213,7 @@ Trusted Publisher → GitHub Actions). `npm trust github` returned an opaque
 
 | Field | Value |
 |---|---|
-| Organization or user | `schuettc` |
+| Organization or user | `subaud-tools` |
 | Repository | `<fork>` |
 | Workflow filename | `upstream-sync.yml` |
 | Environment | **empty** |
@@ -235,11 +235,11 @@ One publisher per package; **replace** an old one, don't add a second.
 
 ```bash
 # 1. wait until the exact version resolves (the registry lags 1–5 min after a publish)
-npm view @schuettc/<pkg>@<version> version
+npm view @subaud-tools/<pkg>@<version> version
 # 2. bump both occurrences in dotfiles/kempt.toml (list form + settings merge line)
-grep -n '@schuettc/<pkg>@' dotfiles/kempt.toml
+grep -n '@subaud-tools/<pkg>@' dotfiles/kempt.toml
 #    an alias-pinned fork (see README "Alias pins") reads
-#    npm:<upstream-name>@npm:@schuettc/<pkg>@<version>; bump the version at the end
+#    npm:<upstream-name>@npm:@subaud-tools/<pkg>@<version>; bump the version at the end
 # 3. commit dotfiles, then apply
 kempt update            # takes effect on the next pi launch, not the running session
 ```
@@ -272,7 +272,7 @@ Dependabot bumps. Nothing is copied into a fork.
    (`fork-sync/tests/action.sh` fails until they agree) and every
    `tested-tree@` pin (`tested-tree/tests/check.sh` fails until they agree).
    CI green, Court approves, the merge tags `v<VERSION>`.
-6. Roll out: Dependabot opens a `github-actions` PR against `schuettc-publish`
+6. Roll out: Dependabot opens a `github-actions` PR against `publish`
    in each fork in tools-ops' `forks.tsv` (weekly, after a 3-day cooldown).
    Merge each one; its `ci:` commit is exempt from `patches.tsv`.
    `pi-permission-system` keeps Dependabot disabled (see the Quick
@@ -286,20 +286,20 @@ Dependabot bumps. Nothing is copied into a fork.
 ## Environment traps (the short list)
 
 - **gh picks the wrong repo:** with a remote named `upstream`, `gh` defaults to
-  it. Always pass `-R schuettc/<fork>`. (This is why issue alerts silently
+  it. Always pass `-R subaud-tools/<fork>`. (This is why issue alerts silently
   failed before the standard.)
 - **Registry lag:** `npm view` returns 404 or the old `latest` for minutes after
   a successful publish. Trust the run log's `Published @…` line and the pushed
   git tag, then poll the exact version.
 - **Upstream workflows ride along** on a fork (release, publish, compat
   crons). Disable every one except `upstream-sync` (`gh workflow disable
-  <file> -R schuettc/<fork>`); `muda check fork-sync` flags stragglers.
+  <file> -R subaud-tools/<fork>`); `muda check fork-sync` flags stragglers.
 - **Cron only fires on the default branch:** the fork's default branch must be
-  `schuettc-publish` (pi-usage's old sync never ran because it lived elsewhere).
+  `publish` (pi-usage's old sync never ran because it lived elsewhere).
 - **`--ignore-scripts` on publish:** upstream `prepublishOnly`/`prepack` hooks
   (monorepo-relative builds, "publish via CI only" guards) break in the isolated
   copy. Anything that must happen before packing goes in `build_cmd`.
-- **Naming:** `@schuettc/<name>` only for forks of others' packages; packages
+- **Naming:** `@subaud-tools/<name>` only for forks of others' packages; packages
   we own publish unscoped.
 - **Coordinate first:** check `muster` for a live session on the same repo and
   message it before taking over a branch.

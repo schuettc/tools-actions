@@ -95,7 +95,7 @@ jobs:
       contents: write # enable auto-merge on the PR
       pull-requests: write # mark the PR for auto-merge
     steps:
-      - uses: schuettc/tools-actions/dependabot-automerge@v0.10.4
+      - uses: subaud-tools/tools-actions/dependabot-automerge@v0.11.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           target-branch: dev
@@ -112,7 +112,7 @@ jobs:
       pull-requests: read # list open Dependabot PRs
       issues: write # open / update / close the tracking issue
     steps:
-      - uses: schuettc/tools-actions/dependabot-stale@v0.10.4
+      - uses: subaud-tools/tools-actions/dependabot-stale@v0.11.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           stale-days: "14"
@@ -213,7 +213,7 @@ Dependabot), not Actions secrets.
   auto-merge) and `pull-requests: write` (mark the PR for auto-merge). The
   top-level workflow declares `permissions: {}` so no other scope is ambient.
 - **Exact pins.** `dependabot/fetch-metadata` is pinned to `v2.5.0`; callers pin
-  this action to an exact `schuettc/tools-actions/dependabot-automerge@vX.Y.Z`.
+  this action to an exact `subaud-tools/tools-actions/dependabot-automerge@vX.Y.Z`.
 
 ## Scope
 

@@ -99,16 +99,16 @@ def test_toolchain_action_contract(action_doc: dict) -> None:
 
 
 def test_readme_pins_match_version() -> None:
-    # Every `schuettc/tools-actions/toolchain@vX.Y.Z` pin in the README must
+    # Every `subaud-tools/tools-actions/toolchain@vX.Y.Z` pin in the README must
     # equal `v` + the repo VERSION (mirrors images' snippet-pin test), so a
     # release bump can never leave a stale pin in the docs.
     root = ACTION_DIR.parents[0]
     version = (root / "VERSION").read_text().strip()
     readme = (ACTION_DIR / "README.md").read_text()
-    pins = re.findall(r"schuettc/tools-actions/toolchain@v[\w.\-]+", readme)
-    assert pins, "README must pin schuettc/tools-actions/toolchain@vX.Y.Z"
+    pins = re.findall(r"subaud-tools/tools-actions/toolchain@v[\w.\-]+", readme)
+    assert pins, "README must pin subaud-tools/tools-actions/toolchain@vX.Y.Z"
     for pin in pins:
-        assert pin == f"schuettc/tools-actions/toolchain@v{version}", (
+        assert pin == f"subaud-tools/tools-actions/toolchain@v{version}", (
             f"{pin} does not match VERSION v{version}"
         )
 

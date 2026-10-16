@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies tested-tree/action.yml is byte-identical to the muda source
-# recorded in SOURCE, that every schuettc/tools-actions/tested-tree@ pin in
+# recorded in SOURCE, that every subaud-tools/tools-actions/tested-tree@ pin in
 # README.md equals v$(cat VERSION), and that both README.md workflow examples
 # (the recording step a consumer keeps in its ci.yml, and the deploy-job
 # example that calls this lookup) are clean under actionlint.
@@ -49,9 +49,9 @@ else
   want_pin="v$(tr -d '[:space:]' < "$ROOT/VERSION")"
   pins=()
   while IFS= read -r p; do pins+=("$p"); done \
-    < <(grep -oE 'schuettc/tools-actions/tested-tree@[^[:space:]`"'"'"')]*' "$README" | sed 's/.*@//')
+    < <(grep -oE 'subaud-tools/tools-actions/tested-tree@[^[:space:]`"'"'"')]*' "$README" | sed 's/.*@//')
   if [ "${#pins[@]}" -eq 0 ]; then
-    fail "README.md pins schuettc/tools-actions/tested-tree@ at least once"
+    fail "README.md pins subaud-tools/tools-actions/tested-tree@ at least once"
   else
     bad=0
     for p in "${pins[@]}"; do

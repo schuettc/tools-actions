@@ -32,7 +32,7 @@ cat > "$repo/.github/workflows/ci.yml" <<'YML'
 jobs:
   ci:
     steps:
-      - uses: schuettc/tools-actions/go-ci@v9.9.9
+      - uses: subaud-tools/tools-actions/go-ci@v9.9.9
 YML
 mkdir -p "$W/bin"; printf '#!/bin/sh\necho "golangci-lint has version 2.12.2"\n' > "$W/bin/golangci-lint"; chmod +x "$W/bin/golangci-lint"
 # -u GOTOOLCHAIN: CI's setup-go exports GOTOOLCHAIN=local, which local.sh would
@@ -59,13 +59,13 @@ check "no go-ci pin in ci.yml fails and says so" '[ $rc -ne 0 ] && grep -q "go-c
 rm -rf "$repo/.github"
 run; rc=$?
 check "no ci.yml fails and says so" '[ $rc -ne 0 ] && grep -q "ci.yml" "$W/log"'
-mkdir -p "$repo/.github/workflows"; printf '      - uses: schuettc/tools-actions/go-ci@v8.0.0\n' > "$repo/.github/workflows/ci.yml"
+mkdir -p "$repo/.github/workflows"; printf '      - uses: subaud-tools/tools-actions/go-ci@v8.0.0\n' > "$repo/.github/workflows/ci.yml"
 run; rc=$?
 check "a version that cannot be fetched fails and names it" '[ $rc -ne 0 ] && grep -q "v8.0.0" "$W/log"'
 
 echo "== golangci-lint: the pinned version, installed if needed"
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"; case "$(uname -m)" in arm64|aarch64) arch=arm64;; *) arch=amd64;; esac
-printf '      - uses: schuettc/tools-actions/go-ci@v9.9.9\n' > "$repo/.github/workflows/ci.yml"
+printf '      - uses: subaud-tools/tools-actions/go-ci@v9.9.9\n' > "$repo/.github/workflows/ci.yml"
 mkdir -p "$W/pub/v9.9.9/go-ci"
 printf '#!/usr/bin/env bash\necho "gate ran with $(golangci-lint --version)"\n' > "$W/pub/v9.9.9/go-ci/ci.sh"
 printf 'version: "2"\n' > "$W/pub/v9.9.9/go-ci/golangci.yml"

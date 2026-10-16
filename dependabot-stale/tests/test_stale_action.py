@@ -221,7 +221,7 @@ def test_readme_caller_actionlint_clean(tmp_path: Path):
         local_dir.mkdir(parents=True, exist_ok=True)
         local = local_dir / f"_readme_stale_caller_{i}.yml"
         swapped = re.sub(
-            r"schuettc/tools-actions/(dependabot-stale|dependabot-automerge)@v\S+",
+            r"subaud-tools/tools-actions/(dependabot-stale|dependabot-automerge)@v\S+",
             r"./\1",
             block,
         )
@@ -278,7 +278,7 @@ def test_readme_caller_runner_is_pinned():
 
 def test_readme_pins_this_repo_at_release_tag():
     version = (REPO_ROOT / "VERSION").read_text().strip()
-    pins = re.findall(r"schuettc/tools-actions/\S+@(v\d\S*)", README.read_text())
+    pins = re.findall(r"subaud-tools/tools-actions/\S+@(v\d\S*)", README.read_text())
     assert pins, "README must show at least one pinned caller example"
     for pin in pins:
         assert pin == f"v{version}", f"README pin {pin} != v{version}"

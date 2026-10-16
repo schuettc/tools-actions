@@ -47,7 +47,7 @@ _PLACEHOLDER = "EXPR_PLACEHOLDER"
 _FENCE_RE = re.compile(r"```yaml\n(.*?)```", re.DOTALL)
 # The README composition snippets reference the action by its published or local
 # path; either form marks a step that wires the images action.
-_ACTION_REFS = ("./images", "schuettc/tools-actions/images")
+_ACTION_REFS = ("./images", "subaud-tools/tools-actions/images")
 
 
 def _yaml_blocks(text: str) -> list[str]:

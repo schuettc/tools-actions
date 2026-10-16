@@ -101,16 +101,16 @@ def test_images_action_contract(action_doc: dict) -> None:
 
 
 def test_readme_pins_match_version() -> None:
-    # M5: every `schuettc/tools-actions/images@vX.Y.Z` pin in the README must
+    # M5: every `subaud-tools/tools-actions/images@vX.Y.Z` pin in the README must
     # equal `v` + the repo VERSION (mirrors fork-sync's snippet-pin test), so a
     # release bump can never leave a stale pin in the docs.
     root = ACTION_DIR.parents[0]
     version = (root / "VERSION").read_text().strip()
     readme = (ACTION_DIR / "README.md").read_text()
-    pins = re.findall(r"schuettc/tools-actions/images@v[\w.\-]+", readme)
-    assert pins, "README must pin schuettc/tools-actions/images@vX.Y.Z"
+    pins = re.findall(r"subaud-tools/tools-actions/images@v[\w.\-]+", readme)
+    assert pins, "README must pin subaud-tools/tools-actions/images@vX.Y.Z"
     for pin in pins:
-        assert pin == f"schuettc/tools-actions/images@v{version}", (
+        assert pin == f"subaud-tools/tools-actions/images@v{version}", (
             f"{pin} does not match VERSION v{version}"
         )
 

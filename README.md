@@ -49,10 +49,10 @@ Callers must pin the action to an exact release tag, never a branch or
 `@main`:
 
 ```yaml
-- uses: schuettc/tools-actions/<action>@vX.Y.Z
+- uses: subaud-tools/tools-actions/<action>@vX.Y.Z
 ```
 
-`<action>` is the directory name, e.g. `schuettc/tools-actions/fork-sync@v0.10.4`.
+`<action>` is the directory name, e.g. `subaud-tools/tools-actions/fork-sync@v0.11.0`.
 Floating references (`@main`, `@v1`, no tag at all) are not supported and
 must not be used.
 
@@ -75,7 +75,7 @@ same way any caller's fork of these actions would.
 
 Consumers of these actions get updates the same way: point Dependabot's
 `github-actions` ecosystem at the caller repo, and it will propose bumping
-`schuettc/tools-actions/<action>@vX.Y.Z` pins as new releases are cut here.
+`subaud-tools/tools-actions/<action>@vX.Y.Z` pins as new releases are cut here.
 
 ## License
 

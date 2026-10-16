@@ -225,7 +225,7 @@ def test_readme_caller_actionlint_clean(tmp_path: Path):
         # against the real local action.yml.
         local.write_text(
             re.sub(
-                r"schuettc/tools-actions/(dependabot-automerge|dependabot-stale)@v\S+",
+                r"subaud-tools/tools-actions/(dependabot-automerge|dependabot-stale)@v\S+",
                 r"./\1",
                 block,
             )
@@ -369,7 +369,7 @@ def test_readme_dependabot_yml_example_loads():
 def test_readme_pins_this_repo_at_release_tag():
     version = (REPO_ROOT / "VERSION").read_text().strip()
     # Require a digit after @v so the prose placeholder `@vX.Y.Z` is not counted.
-    pins = re.findall(r"schuettc/tools-actions/\S+@(v\d\S*)", README.read_text())
+    pins = re.findall(r"subaud-tools/tools-actions/\S+@(v\d\S*)", README.read_text())
     assert pins, "README must show at least one pinned caller example"
     for pin in pins:
         assert pin == f"v{version}", f"README pin {pin} != v{version}"

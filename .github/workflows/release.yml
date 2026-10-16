@@ -4,7 +4,7 @@ name: release
 # on main and no tag v<VERSION> exists yet, this workflow creates the tag
 # and a GitHub release with auto-generated notes. There is no build step —
 # the published artifact is the tagged source, consumed by callers pinning
-# `schuettc/tools-actions/<action>@vX.Y.Z`. A merge that doesn't bump
+# `subaud-tools/tools-actions/<action>@vX.Y.Z`. A merge that doesn't bump
 # VERSION releases nothing.
 on:
   push:
