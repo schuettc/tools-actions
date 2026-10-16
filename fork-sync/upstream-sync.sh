@@ -2,15 +2,15 @@
 # shellcheck disable=SC2016
 # (SC2016: the single-quoted `node -e` programs and the literal backticks in
 # issue bodies are intentional; nothing in them is meant to expand.)
-# Canonical fork-sync script for @schuettc/* republished forks.
-# Source of truth: schuettc/tools-actions/fork-sync/upstream-sync.sh. Forks never
+# Canonical fork-sync script for @subaud-tools/* republished forks.
+# Source of truth: subaud-tools/tools-actions/fork-sync/upstream-sync.sh. Forks never
 # carry a copy: the fork-sync composite action (fork-sync/action.yml) runs it from
 # $GITHUB_ACTION_PATH, and per-fork settings live only in the caller's `with:`.
-# Operating the forks: schuettc/tools-actions/fork-sync/RUNBOOK.md.
+# Operating the forks: subaud-tools/tools-actions/fork-sync/RUNBOOK.md.
 #
-# Model (see schuettc/tools-actions/fork-sync/README.md):
-#   - schuettc-publish = upstream + genuine source patches + this CI. It never
-#     carries packaging metadata (scoped name, -schuettc.N version, repo URLs).
+# Model (see subaud-tools/tools-actions/fork-sync/README.md):
+#   - publish = upstream + genuine source patches + this CI. It never
+#     carries packaging metadata (scoped name, -subaud-tools.N version, repo URLs).
 #   - Daily: rebase onto upstream. Clean -> stamp metadata into an isolated copy
 #     of the package, publish via npm OIDC trusted publishing (provenance), push
 #     the rebased branch + a tag. Conflict or any other failure -> open (or reuse)
@@ -19,7 +19,7 @@
 # Required env (set by fork-sync/action.yml from its inputs):
 #   UPSTREAM_REPO    owner/name of the upstream repo
 #   UPSTREAM_BRANCH  upstream branch to track (main, master, ...)
-#   PKG_NAME         published name, e.g. @schuettc/pi-claude-bridge
+#   PKG_NAME         published name, e.g. @subaud-tools/pi-claude-bridge
 #   PKG_DIR          package directory relative to the repo root ("." for root)
 #   TAG_PREFIX       git tag prefix for releases, e.g. "v" or "pi-auto-review-v"
 # Optional env:
@@ -38,10 +38,10 @@
 # Provided by Actions: GITHUB_REPOSITORY, GITHUB_REPOSITORY_OWNER, GITHUB_SERVER_URL, GITHUB_RUN_ID, GH_TOKEN
 set -Eeuo pipefail
 
-# stamp_package <package.json>: write the published name, -schuettc.N version
+# stamp_package <package.json>: write the published name, -subaud-tools.N version
 # and fork repo URLs into an isolated copy's package.json (env PKG_NAME, VER,
 # FORK, DIR_FIELD). The one place stamping lives: the daily flow below calls it,
-# and schuettc/tools-actions/fork-sync/first-publish.sh reaches it through
+# and subaud-tools/tools-actions/fork-sync/first-publish.sh reaches it through
 # `upstream-sync.sh --stamp <package.json>`, so a first publish is stamped
 # exactly the way CI stamps.
 stamp_package() {
@@ -51,7 +51,7 @@ stamp_package() {
   p.name = PKG_NAME;
   p.version = VER;
   p.repository = { type: "git", url: `git+https://github.com/${FORK}.git`, ...(DIR_FIELD ? { directory: DIR_FIELD } : {}) };
-  p.homepage = DIR_FIELD ? `https://github.com/${FORK}/tree/schuettc-publish/${DIR_FIELD}#readme` : `https://github.com/${FORK}#readme`;
+  p.homepage = DIR_FIELD ? `https://github.com/${FORK}/tree/publish/${DIR_FIELD}#readme` : `https://github.com/${FORK}#readme`;
   p.bugs = { url: `https://github.com/${FORK}/issues` };
   delete p.private;
   fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
@@ -67,7 +67,7 @@ fi
 FORCE="${FORCE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
 NOTIFY_TEST="${NOTIFY_TEST:-false}"
-BRANCH="schuettc-publish"
+BRANCH="publish"
 FORK="${GITHUB_REPOSITORY:?}"
 RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/${FORK}/actions/runs/${GITHUB_RUN_ID:-local}"
 PHASE="setup"
@@ -118,7 +118,7 @@ if [ "$NOTIFY_TEST" = "true" ]; then
 fi
 
 PHASE="fetch-upstream"
-git config user.name "schuettc-fork-bot"
+git config user.name "subaud-tools-fork-bot"
 git config user.email "actions@github.com"
 git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null \
   || git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
@@ -162,12 +162,12 @@ next_n="$(BASE="$upstream_ver" PUBLISHED="$published" node -e '
   let v = [];
   try { v = JSON.parse(process.env.PUBLISHED); } catch (_) {}
   if (!Array.isArray(v)) v = [v];
-  const re = new RegExp("^" + base.replace(/[.]/g, "\\.") + "-schuettc\\.(\\d+)$");
+  const re = new RegExp("^" + base.replace(/[.]/g, "\\.") + "-subaud-tools\\.(\\d+)$");
   let max = 0;
   for (const s of v) { const m = re.exec(s); if (m) max = Math.max(max, parseInt(m[1], 10)); }
   process.stdout.write(String(max + 1));
 ')"
-new_ver="${upstream_ver}-schuettc.${next_n}"
+new_ver="${upstream_ver}-subaud-tools.${next_n}"
 echo "publishing new version: ${new_ver}"
 
 if [ -n "${TEST_CMD:-}" ]; then
@@ -234,8 +234,8 @@ fi
 ( cd "$pubdir" && npm publish --provenance --access public --tag latest --ignore-scripts )
 rm -rf "$pubdir"
 
-# Keep schuettc-publish rebased so tomorrow's run sees ahead=0. The branch keeps
-# upstream's name/version; the scoped name and -schuettc.N live on npm + the tag.
+# Keep publish rebased so tomorrow's run sees ahead=0. The branch keeps
+# upstream's name/version; the scoped name and -subaud-tools.N live on npm + the tag.
 PHASE="push"
 git push --force-with-lease origin "HEAD:${BRANCH}"
 git tag "${TAG_PREFIX}${new_ver}"

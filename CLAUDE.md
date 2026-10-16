@@ -22,7 +22,7 @@ change here.
 - Every `runs-on:` runner is an **exact** label (e.g. `ubuntu-26.04`),
   never `-latest`.
 - Actions published from this repo must document the same expectation for
-  their own callers: pin `schuettc/tools-actions/<action>@vX.Y.Z`.
+  their own callers: pin `subaud-tools/tools-actions/<action>@vX.Y.Z`.
 
 ## Layout
 

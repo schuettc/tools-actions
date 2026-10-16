@@ -20,10 +20,10 @@ script="$(cd "$(dirname "$0")" && pwd)/upstream-sync.sh"
 [ -f "$script" ] || { echo "first-publish: $script is missing" >&2; exit 1; }
 
 setting() { # key -> value from the fork-sync step's `with:` block ("" when absent)
-  # Scoped to the step that uses schuettc/tools-actions/fork-sync@...; values are
+  # Scoped to the step that uses subaud-tools/tools-actions/fork-sync@...; values are
   # one-line YAML scalars, double-quoted or plain.
   awk -v key="$1" '
-    /uses:[[:space:]]*schuettc\/tools-actions\/fork-sync@/ { in_step = 1; next }
+    /uses:[[:space:]]*subaud-tools\/tools-actions\/fork-sync@/ { in_step = 1; next }
     in_step && /^[[:space:]]*-[[:space:]]/ { in_step = 0 }
     in_step && $0 ~ "^[[:space:]]+" key ":" {
       v = $0; sub("^[[:space:]]+" key ":[[:space:]]*", "", v); sub(/[[:space:]]+$/, "", v)
@@ -36,15 +36,15 @@ TEST_CMD="$(setting test_cmd)"; BUILD_CMD="$(setting build_cmd)"
 [ -n "$PKG_NAME" ] && [ -n "$PKG_DIR" ] || { echo "first-publish: pkg_name/pkg_dir missing from the fork-sync step in $wf" >&2; exit 1; }
 
 cd "$repo"
-git fetch -q origin schuettc-publish
-[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/schuettc-publish)" ] || {
-  echo "first-publish: check out origin/schuettc-publish first (HEAD differs), so the tarball is what CI would publish" >&2; exit 1; }
+git fetch -q origin publish
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/publish)" ] || {
+  echo "first-publish: check out origin/publish first (HEAD differs), so the tarball is what CI would publish" >&2; exit 1; }
 [ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "first-publish: working tree has changes" >&2; exit 1; }
 
 FORK="${FORK:-$(git remote get-url origin | sed -E 's#^(git@github.com:|https://github.com/)##; s#\.git$##')}"
 DIR_FIELD="${PKG_DIR#./}"; DIR_FIELD="${DIR_FIELD%/}"; [ "$DIR_FIELD" = "." ] && DIR_FIELD=""
 base="$(node -pe "require('./${DIR_FIELD:+$DIR_FIELD/}package.json').version")"
-VER="${base}-schuettc.1"
+VER="${base}-subaud-tools.1"
 if npm view "$PKG_NAME" name >/dev/null 2>&1; then
   echo "first-publish: $PKG_NAME already exists on npm; publish through the workflow (force dispatch) instead" >&2; exit 1
 fi

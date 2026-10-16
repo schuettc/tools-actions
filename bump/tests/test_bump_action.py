@@ -231,10 +231,10 @@ def test_reusable_workflow_pins_the_bump_composite_to_version() -> None:
     """The reusable workflow calls the bump composite at THIS repo's release tag;
     the contract tests require that pin to equal v$(cat VERSION)."""
     raw = REUSABLE.read_text()
-    pins = re.findall(r"schuettc/tools-actions/bump@v[\w.\-]+", raw)
-    assert pins, "reusable workflow must pin schuettc/tools-actions/bump@vX.Y.Z"
+    pins = re.findall(r"subaud-tools/tools-actions/bump@v[\w.\-]+", raw)
+    assert pins, "reusable workflow must pin subaud-tools/tools-actions/bump@vX.Y.Z"
     for pin in pins:
-        assert pin == f"schuettc/tools-actions/bump@v{_version()}", (
+        assert pin == f"subaud-tools/tools-actions/bump@v{_version()}", (
             f"{pin} does not match VERSION v{_version()}"
         )
 
@@ -252,8 +252,8 @@ def test_no_project_facts_leak() -> None:
 def test_readme_pins_match_version() -> None:
     assert README.exists(), f"missing {README}"
     readme = README.read_text()
-    pins = re.findall(r"schuettc/tools-actions/[\w.\-/]+@v[\w.\-]+", readme)
-    assert pins, "README must pin schuettc/tools-actions/... @vX.Y.Z"
+    pins = re.findall(r"subaud-tools/tools-actions/[\w.\-/]+@v[\w.\-]+", readme)
+    assert pins, "README must pin subaud-tools/tools-actions/... @vX.Y.Z"
     for pin in pins:
         assert pin.endswith(f"@v{_version()}"), f"{pin} does not match VERSION v{_version()}"
 
@@ -353,7 +353,7 @@ def test_actionlint_on_reusable_and_the_readme_caller(tmp_path: Path) -> None:
     caller, so a missing permissions block (or a bad with:/secrets:) fails CI."""
     repo, config_file = _actionlint_repo(tmp_path)
     caller_src = _readme_caller_block().replace(
-        "schuettc/tools-actions/.github/workflows/bump-pin.yml@v" + _version(),
+        "subaud-tools/tools-actions/.github/workflows/bump-pin.yml@v" + _version(),
         "./.github/workflows/bump-pin.yml",
     )
     caller = repo / ".github" / "workflows" / "bump-lib.yml"

@@ -5,7 +5,7 @@ composite action into its own PR workflow. Those snippets are the contract users
 copy, so they must parse and lint exactly as GitHub would run them. For every
 fenced ``yaml`` block that declares ``jobs:`` wiring the toolchain action we:
 
-* rewrite the published pin ``schuettc/tools-actions/toolchain@vX.Y.Z`` to a
+* rewrite the published pin ``subaud-tools/tools-actions/toolchain@vX.Y.Z`` to a
   local ``./toolchain`` reference and drop a copy of the real action there, so
   ``actionlint`` resolves the composite and checks each snippet's ``with:``
   inputs against the action's *declared* inputs (an unknown input, or a bad
@@ -33,7 +33,7 @@ ACTION_DIR = Path(__file__).resolve().parents[1]
 README = ACTION_DIR / "README.md"
 
 _FENCE_RE = re.compile(r"```yaml\n(.*?)```", re.DOTALL)
-_ACTION_REF = "schuettc/tools-actions/toolchain"
+_ACTION_REF = "subaud-tools/tools-actions/toolchain"
 
 
 def _yaml_blocks(text: str) -> list[str]:

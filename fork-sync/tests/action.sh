@@ -14,7 +14,7 @@
 #     (Review Focus 2);
 #   - checkout fetches inputs.publish_branch with full history and the caller's
 #     token, whatever ref the workflow was dispatched from (Review Focus 4);
-#   - a guard step, first, fails any publish_branch but schuettc-publish (the
+#   - a guard step, first, fails any publish_branch but publish (the
 #     script hard-codes that branch for its push);
 #   - every `uses:` is an exact vX.Y.Z;
 #   - the README caller snippet pins this repo's VERSION, passes exactly the
@@ -65,7 +65,7 @@ for i in force dry_run notify_test; do
   check "input $i defaults to \"false\"" '[ "$(yq -r ".inputs.$i.default | tag" "$ACTION")" = "!!str" ] && [ "$(q ".inputs.$i.default")" = false ]'
 done
 check "input node_version defaults to \"22\"" '[ "$(yq -r ".inputs.node_version.default | tag" "$ACTION")" = "!!str" ] && [ "$(q .inputs.node_version.default)" = 22 ]'
-check "input publish_branch defaults to schuettc-publish" '[ "$(q .inputs.publish_branch.default)" = schuettc-publish ]'
+check "input publish_branch defaults to publish" '[ "$(q .inputs.publish_branch.default)" = publish ]'
 check "input token defaults to the caller's github.token" '[ "$(q .inputs.token.default)" = "\${{ github.token }}" ]'
 for i in build_cmd force dry_run notify_test node_version publish_branch token; do
   check "input $i is optional" '[ "$(q ".inputs.$i.required")" != true ]'
@@ -83,19 +83,21 @@ check "step order: publish_branch guard, checkout, setup-node, npm upgrade, sync
   '[ "$(yq -r "[.runs.steps[] | (.id // .uses // .run) | sub(\"@.*\", \"\") | sub(\"\n\$\", \"\")] | join(\"|\")" "$ACTION")" = "publish-branch-guard|actions/checkout|actions/setup-node|npm install -g npm|bash \"\$GITHUB_ACTION_PATH/upstream-sync.sh\"" ]'
 
 echo "== publish_branch guard"
-# upstream-sync.sh hard-codes BRANCH=schuettc-publish and force-pushes HEAD to it;
-# checking out any other branch would push that branch over schuettc-publish.
+# upstream-sync.sh hard-codes BRANCH=publish and force-pushes HEAD to it;
+# checking out any other branch would push that branch over publish.
 GUARD='.runs.steps[] | select(.id == "publish-branch-guard")'
-check "script still hard-codes schuettc-publish (guard needed)" 'grep -qx '"'"'BRANCH="schuettc-publish"'"'"' "$SCRIPT"'
+check "script still hard-codes publish (guard needed)" 'grep -qx '"'"'BRANCH="publish"'"'"' "$SCRIPT"'
 check "guard is the first step, before checkout" '[ "$(yq -r ".runs.steps[0].id" "$ACTION")" = publish-branch-guard ]'
 check "guard reads inputs.publish_branch" '[ "$(yq -r "$GUARD | .env.PUBLISH_BRANCH" "$ACTION")" = "\${{ inputs.publish_branch }}" ]'
 guard_run() { # <branch> -> runs the guard's shell body; sets GRC and GOUT
   GOUT="$(PUBLISH_BRANCH="$1" bash -c "$(yq -r "$GUARD | .run" "$ACTION")" 2>&1)"; GRC=$?
 }
+guard_run publish
+check "guard passes publish" '[ "$GRC" = 0 ] && [ -z "$GOUT" ]'
 guard_run schuettc-publish
-check "guard passes schuettc-publish" '[ "$GRC" = 0 ] && [ -z "$GOUT" ]'
+check "guard fails the retired schuettc-publish branch" '[ "$GRC" != 0 ]'
 guard_run other
-check "guard fails any other branch with ::error::" '[ "$GRC" != 0 ] && grep -q "^::error::.*supports only schuettc-publish" <<<"$GOUT"'
+check "guard fails any other branch with ::error::" '[ "$GRC" != 0 ] && grep -q "^::error::.*supports only publish" <<<"$GOUT"'
 guard_run ""
 check "guard fails an empty branch" '[ "$GRC" != 0 ]'
 
@@ -163,9 +165,9 @@ snippet="$W/repo/.github/workflows/upstream-sync.yml"
 check "README has a yaml snippet under \"$SNIPPET_HEADING\"" '[ -s "$snippet" ]'
 if [ -s "$snippet" ]; then
   version="$(tr -d '[:space:]' < "$ROOT/VERSION")"
-  SNIP_STEP='.jobs[].steps[] | select((.uses // "") | test("^schuettc/tools-actions/fork-sync@"))'
-  check "snippet pins schuettc/tools-actions/fork-sync@v$version (VERSION)" \
-    '[ "$(yq -r "$SNIP_STEP | .uses" "$snippet")" = "schuettc/tools-actions/fork-sync@v$version" ]'
+  SNIP_STEP='.jobs[].steps[] | select((.uses // "") | test("^subaud-tools/tools-actions/fork-sync@"))'
+  check "snippet pins subaud-tools/tools-actions/fork-sync@v$version (VERSION)" \
+    '[ "$(yq -r "$SNIP_STEP | .uses" "$snippet")" = "subaud-tools/tools-actions/fork-sync@v$version" ]'
   want="$(yq -r '.inputs | to_entries | map(select(.value.required == true or (.key | test("^(build_cmd|force|dry_run|notify_test)$")))) | .[].key' "$ACTION" | sort | tr '\n' ' ')"
   got="$(yq -r "$SNIP_STEP | .with | keys | .[]" "$snippet" | sort | tr '\n' ' ')"
   check "snippet with: passes every required input plus build_cmd and the dispatch flags" '[ "$got" = "$want" ]'

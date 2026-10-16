@@ -28,17 +28,17 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with: { ref: "${{ inputs.tag }}" }
       - id: rel
-        uses: schuettc/tools-actions/release-version@v0.10.4
+        uses: subaud-tools/tools-actions/release-version@v0.11.0
         with: { mode: version-file, dispatch-tag: "${{ inputs.tag }}" }
       - if: steps.rel.outputs.skip != 'true'
-        uses: schuettc/tools-actions/go-release@v0.10.4
+        uses: subaud-tools/tools-actions/go-release@v0.11.0
         with:
           binaries: |
             kempt=./cmd/kempt
           ldflags: >-
-            -X github.com/schuettc/kempt/internal/version.version={version}
-            -X github.com/schuettc/kempt/internal/version.commit={commit}
-            -X github.com/schuettc/kempt/internal/version.date={date}
+            -X github.com/subaud-tools/kempt/internal/version.version={version}
+            -X github.com/subaud-tools/kempt/internal/version.commit={commit}
+            -X github.com/subaud-tools/kempt/internal/version.date={date}
           stamp-check: kempt
           tag: ${{ steps.rel.outputs.tag }}
           version: ${{ steps.rel.outputs.version }}
