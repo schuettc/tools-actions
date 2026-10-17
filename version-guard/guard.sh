@@ -12,7 +12,7 @@
 set -euo pipefail
 labels="$(gh api "repos/${REPO:?}/issues/${PR_NUMBER:?}/labels" --jq '.[].name')" || {
   echo "::error::cannot read the labels of PR #$PR_NUMBER (needs pull-requests: read)"; exit 1; }
-case " $(echo $labels) " in
+case " $(printf '%s' "$labels" | tr '\n' ' ') " in
   *" no-release "*) echo "no-release label present: skipping the VERSION check."; exit 0 ;;
 esac
 semver='^[0-9]+\.[0-9]+\.[0-9]+$'
