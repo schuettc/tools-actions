@@ -4,9 +4,15 @@
 # the release branch must therefore raise VERSION to a newer plain semver, or
 # carry the `no-release` label (docs/CI-only changes).
 #
-# Env: BASE (the PR's base sha), LABELS (space-separated label names).
+# Env: BASE (the PR's base sha), PR_NUMBER, REPO (owner/name), GH_TOKEN.
+#
+# Labels are read from the API at run time, not from the event payload: a PR
+# opened with a label (`gh pr create --label`) starts an `opened` run whose
+# payload has no labels yet, and that stale failure otherwise sticks to the PR.
 set -euo pipefail
-case " ${LABELS:-} " in
+labels="$(gh api "repos/${REPO:?}/issues/${PR_NUMBER:?}/labels" --jq '.[].name')" || {
+  echo "::error::cannot read the labels of PR #$PR_NUMBER (needs pull-requests: read)"; exit 1; }
+case " $(echo $labels) " in
   *" no-release "*) echo "no-release label present: skipping the VERSION check."; exit 0 ;;
 esac
 semver='^[0-9]+\.[0-9]+\.[0-9]+$'

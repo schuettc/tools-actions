@@ -81,7 +81,7 @@ jobs:
   sync:
     runs-on: ubuntu-26.04
     steps:
-      - uses: subaud-tools/tools-actions/fork-sync@v0.11.0
+      - uses: subaud-tools/tools-actions/fork-sync@v0.11.1
         with:
           upstream_repo: "example-org/widget"
           upstream_branch: "main"
