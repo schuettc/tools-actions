@@ -156,7 +156,9 @@ Schema:
   the layer cache repo, e.g. `"prod"` for a project that builds in prod. Only
   the cache ref moves to that account's registry; the image push registry
   (`--registry`) and promotion are unchanged. A name not in `[accounts]` fails
-  at load.
+  at load. The job must log in to that account's registry too: list it in
+  `ecr-login-accounts`. Write the key at the top of the file, before any table,
+  or TOML puts it inside that table and the default (`dev`) applies.
 - `[accounts]` `dev` / `prod` (both required) — dev and prod account ids;
   `prod` may equal `dev` for single-account projects.
 - `[[image]]` rows (at least one), each with:
