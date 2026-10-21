@@ -107,7 +107,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - id: lookup
-        uses: subaud-tools/tools-actions/tested-tree@v0.11.1
+        uses: subaud-tools/tools-actions/tested-tree@v0.12.0
         with:
           base: main
 

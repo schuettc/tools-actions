@@ -73,6 +73,7 @@ def _config_text(
     dev: str = DEV_ACCOUNT,
     prod: str = PROD_ACCOUNT,
     drop: str | None = None,
+    cache_account: str | None = None,
 ) -> str:
     lines: list[str] = []
     for key, value in (
@@ -83,6 +84,8 @@ def _config_text(
     ):
         if drop != key:
             lines.append(f'{key} = "{value}"')
+    if cache_account is not None:
+        lines.append(f'cache_account = "{cache_account}"')
     if drop != "accounts":
         lines.append("[accounts]")
         if drop != "accounts.dev":
@@ -1082,6 +1085,83 @@ def test_cache_ref_derived_with_prefix(tmp_path: Path, monkeypatch: pytest.Monke
     assert f"--cache-from type=registry,ref={A_REF}" in " ".join(a_build)
     assert A_REF.startswith(f"{CACHE_REGISTRY}/{CACHE_REPO}:")
     assert A_REF.endswith(f":{CACHE_PREFIX}-svc-a")
+
+
+def test_cache_account_absent_keeps_dev_cache_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No cache_account: the cache ref is exactly today's, in the dev account.
+    cdk_out = _write_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path)
+    assert "cache_account" not in cfg.read_text()
+    rec = _Recorder()
+    monkeypatch.setattr(images, "_run", rec)
+    argv = _build_argv(cdk_out, cfg, "--registry", REGISTRY, "--mode", "push", "--cache", "readwrite")
+    assert images.main(argv) == 0
+    a_build = next(c for c in rec.build_calls if any(A_HASH in a for a in c))
+    flat = " ".join(a_build)
+    assert (
+        "--cache-from type=registry,ref="
+        "111111111111.dkr.ecr.us-east-1.amazonaws.com/example-buildcache:example-repo-svc-a"
+    ) in flat
+    assert (
+        "--cache-to type=registry,ref="
+        "111111111111.dkr.ecr.us-east-1.amazonaws.com/example-buildcache:example-repo-svc-a,"
+        "mode=max,image-manifest=true,oci-mediatypes=true"
+    ) in flat
+    # The image push registry is untouched.
+    assert f"type=image,name={REGISTRY}:{A_HASH},push=true,oci-mediatypes=false" in a_build
+
+
+def test_cache_account_prod_derives_prod_cache_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # cache_account = "prod" puts the layer cache in accounts.prod's registry;
+    # the image push registry (--registry) does not change.
+    cdk_out = _write_cdk_out(tmp_path)
+    cfg = _write_config(tmp_path, cache_account="prod")
+    rec = _Recorder()
+    monkeypatch.setattr(images, "_run", rec)
+    argv = _build_argv(cdk_out, cfg, "--registry", REGISTRY, "--mode", "push", "--cache", "readwrite")
+    assert images.main(argv) == 0
+    prod_ref = f"{PROD_ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/{CACHE_REPO}:{CACHE_PREFIX}-svc-a"
+    a_build = next(c for c in rec.build_calls if any(A_HASH in a for a in c))
+    flat = " ".join(a_build)
+    assert f"--cache-from type=registry,ref={prod_ref}" in flat
+    assert f"--cache-to type=registry,ref={prod_ref}," in flat
+    assert f"type=image,name={REGISTRY}:{A_HASH},push=true,oci-mediatypes=false" in a_build
+    # --cache read still never writes, whichever account holds the cache.
+    rec2 = _Recorder()
+    monkeypatch.setattr(images, "_run", rec2)
+    assert images.main(_build_argv(cdk_out, cfg, "--mode", "load", "--cache", "read")) == 0
+    for call in rec2.build_calls:
+        flat = " ".join(call)
+        assert f"--cache-from type=registry,ref={PROD_ACCOUNT}." in flat
+        assert "--cache-to" not in flat
+
+
+def test_cache_account_explicit_dev_matches_default(tmp_path: Path) -> None:
+    default = images._load_config(_write_config(tmp_path))
+    explicit = images._load_config(_write_config(tmp_path, cache_account="dev"))
+    assert explicit.cache_ref("svc-a") == default.cache_ref("svc-a") == A_REF
+
+
+@pytest.mark.parametrize("value", ["staging", "", "Prod"])
+def test_cache_account_unknown_name_fails(tmp_path: Path, value: str) -> None:
+    cfg = _write_config(tmp_path, cache_account=value)
+    with pytest.raises(images.ConfigError) as excinfo:
+        images._load_config(cfg)
+    msg = str(excinfo.value)
+    assert "cache_account" in msg
+    assert repr(value) in msg
+
+
+def test_cache_account_wrong_type_fails(tmp_path: Path) -> None:
+    cfg = tmp_path / "images.toml"
+    cfg.write_text("cache_account = 1\n" + _config_text())
+    with pytest.raises(images.ConfigError) as excinfo:
+        images._load_config(cfg)
+    assert "cache_account" in str(excinfo.value)
 
 
 def test_cache_repo_empty_means_no_cache_flags(
