@@ -28,10 +28,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with: { ref: "${{ inputs.tag }}" }
       - id: rel
-        uses: subaud-tools/tools-actions/release-version@v0.11.1
+        uses: subaud-tools/tools-actions/release-version@v0.12.0
         with: { mode: version-file, dispatch-tag: "${{ inputs.tag }}" }
       - if: steps.rel.outputs.skip != 'true'
-        uses: subaud-tools/tools-actions/go-release@v0.11.1
+        uses: subaud-tools/tools-actions/go-release@v0.12.0
         with:
           binaries: |
             kempt=./cmd/kempt

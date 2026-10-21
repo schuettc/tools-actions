@@ -22,7 +22,10 @@ Subcommands (all read ``--cdk-out DIR`` and ``--config PATH``):
                        ``<registry>:<hash>`` and pushes; ``--mode load`` loads
                        locally only. ``--cache none|read|readwrite`` selects the
                        cache mode; the per-image cache ref is derived from config
-                       as ``<cache_registry>/<cache_repo>:<cache_prefix>-<key>``.
+                       as ``<cache_registry>/<cache_repo>:<cache_prefix>-<key>``,
+                       where ``<cache_registry>`` is the ECR registry of the
+                       ``[accounts]`` entry named by the optional
+                       ``cache_account`` (default ``dev``).
 * ``assert-present`` — the deploy guard: every asset's ``<hash>`` tag must exist
                        in the target account's repo, else exit 1 naming each
                        missing ``<stack>/<asset_id>:<hash>``.
@@ -168,6 +171,9 @@ class Config:
     dev_account: str
     prod_account: str
     images: tuple[ImageEntry, ...]
+    # The account id holding the layer cache (``accounts.<cache_account>``);
+    # empty means ``dev_account``, the default when ``cache_account`` is unset.
+    cache_account_id: str = ""
 
     def entry_for(self, dockerfile: str, target: str) -> ImageEntry:
         """Return the ``[[image]]`` entry matching a ``(dockerfile, target)`` pair.
@@ -208,7 +214,8 @@ class Config:
         """The derived registry cache ref for one image, or None if no cache repo."""
         if not self.cache_repo:
             return None
-        registry = f"{self.dev_account}.dkr.ecr.{self.region}.amazonaws.com"
+        account = self.cache_account_id or self.dev_account
+        registry = f"{account}.dkr.ecr.{self.region}.amazonaws.com"
         return f"{registry}/{self.cache_repo}:{self.cache_prefix}-{key}"
 
 
@@ -256,6 +263,25 @@ def _load_config(path: Path) -> Config:
             raise ConfigError(
                 f"images config: {label!r} {account!r} must be a 12-digit AWS account id"
             )
+    # Optional: which [accounts] entry holds the layer cache. Absent means dev,
+    # so a config without it derives exactly the cache refs it always did.
+    cache_account = raw.get("cache_account", "dev")
+    if not isinstance(cache_account, str):
+        raise ConfigError(
+            f"images config: 'cache_account' must be a string, got "
+            f"{type(cache_account).__name__}"
+        )
+    if cache_account not in accounts:
+        raise ConfigError(
+            f"images config: 'cache_account' {cache_account!r} names no [accounts] entry "
+            f"(have {sorted(accounts)})"
+        )
+    cache_account_id = _require_str(accounts, cache_account, where=f"accounts.{cache_account}")
+    if not _ACCOUNT_RE.match(cache_account_id):
+        raise ConfigError(
+            f"images config: 'accounts.{cache_account}' {cache_account_id!r} must be a "
+            f"12-digit AWS account id"
+        )
 
     raw_images = _require(raw, "image", where="image")
     if not isinstance(raw_images, list) or not raw_images:
@@ -315,6 +341,7 @@ def _load_config(path: Path) -> Config:
         dev_account=str(dev_account),
         prod_account=str(prod_account),
         images=tuple(entries),
+        cache_account_id=str(cache_account_id),
     )
 
 

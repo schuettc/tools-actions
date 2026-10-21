@@ -136,7 +136,8 @@ validators): it fails loudly, naming the problem — a missing required key, a
 value that is blank or the wrong type where a non-empty string is required
 (`region`, `bootstrap_qualifier`, `accounts.dev`, `accounts.prod`), an account
 id that is not 12 digits, a `cache_prefix` that is empty or uses invalid tag
-characters while `cache_repo` is set, a bad image key, an ambiguous
+characters while `cache_repo` is set, a `cache_account` that names no
+`[accounts]` entry, a bad image key, an ambiguous
 `(dockerfile, target)` pair, or an out-of-set `deploy_target`.
 
 Schema:
@@ -151,11 +152,17 @@ Schema:
   may be empty only when `cache_repo` is empty; when `cache_repo` is set it must
   be a non-empty string of valid Docker tag characters (it heads the tag
   `<cache_prefix>-<key>`).
+- `cache_account` (optional, default `"dev"`) — which `[accounts]` entry holds
+  the layer cache repo, e.g. `"prod"` for a project that builds in prod. Only
+  the cache ref moves to that account's registry; the image push registry
+  (`--registry`) and promotion are unchanged. A name not in `[accounts]` fails
+  at load.
 - `[accounts]` `dev` / `prod` (both required) — dev and prod account ids;
   `prod` may equal `dev` for single-account projects.
 - `[[image]]` rows (at least one), each with:
   - `key` — a unique label matching `^[a-z0-9][a-z0-9-]*$`; the cache ref is
-    `<dev_registry>/<cache_repo>:<cache_prefix>-<key>`.
+    `<cache_account_registry>/<cache_repo>:<cache_prefix>-<key>` (the dev
+    registry unless `cache_account` says otherwise).
   - `dockerfile` — the asset's Dockerfile path suffix, as it appears in
     `cdk.out` (matched by suffix).
   - `target` — the build target (`dockerBuildTarget`), or `""` when absent.
@@ -177,6 +184,7 @@ region = "us-east-1"
 bootstrap_qualifier = "hnb659fds"
 cache_repo = "build-cache"   # "" = no layer cache
 cache_prefix = "my-repo"     # namespaces each image's cache key
+# cache_account = "prod"     # optional: [accounts] entry holding the cache (default "dev")
 
 [accounts]
 dev = "111111111111"
@@ -216,7 +224,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: subaud-tools/tools-actions/images@v0.11.1
+      - uses: subaud-tools/tools-actions/images@v0.12.0
         with:
           command: build
           cdk-out: cdk.out
@@ -232,14 +240,14 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: subaud-tools/tools-actions/images@v0.11.1
+      - uses: subaud-tools/tools-actions/images@v0.12.0
         with:
           command: build
           cdk-out: cdk.out
           setup-buildx: "true"
           ecr-login-accounts: "111111111111"
           args: --mode push --cache readwrite --registry 111111111111.dkr.ecr.us-east-1.amazonaws.com/cdk-hnb659fds-container-assets-111111111111-us-east-1
-      - uses: subaud-tools/tools-actions/images@v0.11.1
+      - uses: subaud-tools/tools-actions/images@v0.12.0
         with:
           command: assert-present
           cdk-out: cdk.out
@@ -260,18 +268,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - id: promote
-        uses: subaud-tools/tools-actions/images@v0.11.1
+        uses: subaud-tools/tools-actions/images@v0.12.0
         with:
           command: promote
           cdk-out: cdk.out
           ecr-login-accounts: "111111111111 222222222222"
-      - uses: subaud-tools/tools-actions/images@v0.11.1
+      - uses: subaud-tools/tools-actions/images@v0.12.0
         with:
           command: assert-present
           cdk-out: cdk.out
           ecr-login-accounts: "222222222222"
           args: --account 222222222222
-      - uses: subaud-tools/tools-actions/images@v0.11.1
+      - uses: subaud-tools/tools-actions/images@v0.12.0
         with:
           command: check-deployed
           cdk-out: cdk.out
@@ -283,5 +291,5 @@ jobs:
 Pin this action to an exact release tag, never a branch:
 
 ```yaml
-- uses: subaud-tools/tools-actions/images@v0.11.1
+- uses: subaud-tools/tools-actions/images@v0.12.0
 ```
