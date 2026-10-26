@@ -120,7 +120,7 @@ jobs:
         python-version: ["3.12.14", "3.14.7"]
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "${{ matrix.python-version }}"
       - name: Install pinned actionlint
@@ -149,7 +149,7 @@ jobs:
         python-version: ["3.12.14", "3.14.7"]
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "${{ matrix.python-version }}"
       - name: Install pinned actionlint
@@ -178,7 +178,7 @@ jobs:
         python-version: ["3.12.14", "3.14.7"]
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "${{ matrix.python-version }}"
       - name: Install pinned actionlint
@@ -272,7 +272,7 @@ jobs:
         python-version: ["3.12.14", "3.14.7"]
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "${{ matrix.python-version }}"
       - name: Install test deps
@@ -290,7 +290,7 @@ jobs:
         python-version: ["3.12.14", "3.14.7"]
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "${{ matrix.python-version }}"
       - name: Install pinned actionlint
@@ -330,7 +330,7 @@ jobs:
         python-version: ["3.12.14", "3.14.7"]
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "${{ matrix.python-version }}"
       - name: Install pinned actionlint
