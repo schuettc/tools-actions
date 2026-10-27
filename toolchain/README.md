@@ -117,7 +117,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: subaud-tools/tools-actions/toolchain@v0.12.0
+      - uses: subaud-tools/tools-actions/toolchain@v0.13.0
 ```
 
 To scan a subdirectory instead of the repo root, pass `root`:
@@ -130,7 +130,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: subaud-tools/tools-actions/toolchain@v0.12.0
+      - uses: subaud-tools/tools-actions/toolchain@v0.13.0
         with:
           root: services/api
 ```
@@ -140,5 +140,5 @@ jobs:
 Pin this action to an exact release tag, never a branch:
 
 ```yaml
-- uses: subaud-tools/tools-actions/toolchain@v0.12.0
+- uses: subaud-tools/tools-actions/toolchain@v0.13.0
 ```

@@ -133,12 +133,13 @@ check "an asset rebuild creates nothing, only uploads" '! grep -q "^gh release c
 
 echo "== publish-dl"
 : > "$W/calls"
-( cd "$mod" && env DL_TOOL=demo BUCKET=bkt VERSION=1.2.3 PROMOTE=true DISTRIBUTION_ID=EDIST bash "$A/publish-dl.sh" ) > "$W/log" 2>&1; rc=$?
+( cd "$mod" && env DL_TOOL=demo BUCKET=bkt VERSION=1.2.3 PROMOTE=true DISTRIBUTION_ID=EDIST EXTRA_ASSETS='dist/*.zip' bash "$A/publish-dl.sh" ) > "$W/log" 2>&1; rc=$?
 check "publish succeeds" '[ $rc -eq 0 ]'
-check "16 versioned uploads (8 tarballs + 8 .sha256)" '[ "$(grep -c "s3://bkt/dl/demo/1.2.3/" "$W/calls")" -eq 16 ]'
+check "18 versioned uploads (8 tarballs + 1 extra asset, each with a .sha256)" '[ "$(grep -c "s3://bkt/dl/demo/1.2.3/" "$W/calls")" -eq 18 ]'
 check "versioned paths are immutable" '! grep "s3://bkt/dl/demo/1.2.3/" "$W/calls" | grep -vq "max-age=31536000,immutable"'
-check ".sha256 is text/plain" 'grep "\.sha256 " "$W/calls" | grep -q "content-type text/plain"'
-check "extra assets are not published to /dl" '! grep -q "lambda.zip" "$W/calls"'
+check ".sha256 is text/plain" '! grep "\.sha256 " "$W/calls" | grep -vq "content-type text/plain"'
+check "extra assets are published beside the tarballs" 'grep -q "dist/lambda.zip s3://bkt/dl/demo/1.2.3/lambda.zip " "$W/calls" && grep -q "dist/lambda.zip.sha256 s3://bkt/dl/demo/1.2.3/lambda.zip.sha256 " "$W/calls"'
+check "an extra asset's .sha256 names the bare asset and verifies" 'grep -qE "^[0-9a-f]{64}  lambda.zip$" "$mod/dist/lambda.zip.sha256" && ( cd "$mod/dist" && shasum -a 256 -c lambda.zip.sha256 >/dev/null )'
 check "latest written with the bare semver" 'grep -q "s3://bkt/dl/demo/latest" "$W/calls" && [ "$(cat "$W/latest-body")" = "1.2.3" ]'
 check "latest is short-TTL" 'grep "dl/demo/latest" "$W/calls" | grep -q "max-age=60,must-revalidate"'
 check "latest invalidated" 'grep -q "cloudfront create-invalidation --distribution-id EDIST --paths /dl/demo/latest" "$W/calls"'
