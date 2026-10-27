@@ -3,9 +3,9 @@ description: >-
   Builds a Go tool's binaries for darwin/linux x arm64/amd64 with its version
   stamped, signs and notarizes the macOS binaries, checks the stamp on the
   native binary, packages tarballs with .sha256 files and checksums.txt,
-  creates or updates the GitHub release, and publishes to the family download
-  contract (<tool>.tools/dl/<tool>/<version>/, moving /dl/<tool>/latest only
-  for a created, non-prerelease release). Runs in the caller's job, so the
+  creates or updates the GitHub release, and publishes the tarballs and extra
+  assets to the family download contract (<tool>.tools/dl/<tool>/<version>/,
+  moving /dl/<tool>/latest only for a created, non-prerelease release). Runs in the caller's job, so the
   job's `release` environment secrets and OIDC identity are the caller's own.
   Feed it release-version's outputs; skip the step when release-version says
   skip. The calling job must check out the tree and grant contents: write and
@@ -60,7 +60,7 @@ inputs:
     required: false
     default: ""
   extra-assets:
-    description: "Globs of extra files already in dist/ to attach to the release and checksums.txt (not published to /dl)."
+    description: "Globs of extra files already in dist/ to attach to the release and checksums.txt, and to publish to /dl/<tool>/<version>/ with a .sha256 each."
     required: false
     default: ""
   sign:
@@ -184,6 +184,7 @@ runs:
         VERSION: ${{ inputs.version }}
         PROMOTE: ${{ inputs.create == 'true' && inputs.prerelease != 'true' }}
         DISTRIBUTION_ID: ${{ inputs.dl-distribution-id }}
+        EXTRA_ASSETS: ${{ inputs.extra-assets }}
       run: bash "$GITHUB_ACTION_PATH/publish-dl.sh"
     - name: Destroy the signing material
       if: always()

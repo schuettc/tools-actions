@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
-# Publishes every packaged tarball and its .sha256 to the family download
-# contract: s3://<bucket>/dl/<tool>/<version>/<asset> (immutable, long TTL).
+# Publishes every packaged tarball and its .sha256, and each EXTRA_ASSETS file
+# with a .sha256 written here, to the family download contract:
+# s3://<bucket>/dl/<tool>/<version>/<asset> (immutable, long TTL).
 # With PROMOTE=true (a created, non-prerelease release) it also writes
 # /dl/<tool>/latest = the bare semver (short TTL) and invalidates it. An rc
 # pre-release or an asset rebuild publishes versioned paths only.
 #
-# Env: DL_TOOL, BUCKET, VERSION, PROMOTE (true|false), DISTRIBUTION_ID.
+# Env: DL_TOOL, BUCKET, VERSION, PROMOTE (true|false), DISTRIBUTION_ID,
+#      EXTRA_ASSETS (newline/space-separated globs, already in dist/).
 set -euo pipefail
+sum() { if command -v shasum >/dev/null; then shasum -a 256 "$@"; else sha256sum "$@"; fi; }
 : "${DL_TOOL:?}" "${BUCKET:?}" "${VERSION:?}"
 shopt -s nullglob
 files=(dist/*.tar.gz)
 [ ${#files[@]} -gt 0 ] || { echo "::error::go-release: no tarballs in dist/ to publish"; exit 1; }
+for g in ${EXTRA_ASSETS:-}; do
+  for f in $g; do
+    case "$f" in dist/*) ;; *) echo "::error::go-release: extra asset $f is not in dist/"; exit 1;; esac
+    ( cd dist && sum "$(basename "$f")" > "$(basename "$f").sha256" )
+    files+=("$f")
+  done
+done
 immutable='public,max-age=31536000,immutable'
 for f in "${files[@]}"; do
   base="$(basename "$f")"
