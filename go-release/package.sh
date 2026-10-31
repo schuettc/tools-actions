@@ -15,11 +15,10 @@ for d in "${dirs[@]}"; do
   tar -C "$d" -czf "dist/$base.tar.gz" "$name"
   ( cd dist && sum "$base.tar.gz" > "$base.tar.gz.sha256" )
 done
-extras=()
-for g in ${EXTRA_ASSETS:-}; do
-  for f in $g; do
-    case "$f" in dist/*) extras+=("$(basename "$f")");; *) echo "::error::go-release: extra asset $f is not in dist/"; exit 1;; esac
-  done
-done
-( cd dist && sum ./*.tar.gz ${extras[@]+"${extras[@]}"} | sed 's#  \./#  #' > checksums.txt )
+# shellcheck source=go-release/assets.sh
+source "$(dirname "${BASH_SOURCE[0]}")/assets.sh"
+collect_assets dist/*.tar.gz
+names=()
+for f in "${assets[@]}"; do names+=("$(basename "$f")"); done
+( cd dist && sum "${names[@]}" > checksums.txt )
 echo "packaged:"; ls -1 dist/*.tar.gz dist/checksums.txt

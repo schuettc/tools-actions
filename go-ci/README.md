@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: subaud-tools/tools-actions/go-ci@v0.13.0
+      - uses: subaud-tools/tools-actions/go-ci@v0.13.1
 ```
 
 ## The same gate locally

@@ -52,7 +52,7 @@ Callers must pin the action to an exact release tag, never a branch or
 - uses: subaud-tools/tools-actions/<action>@vX.Y.Z
 ```
 
-`<action>` is the directory name, e.g. `subaud-tools/tools-actions/fork-sync@v0.13.0`.
+`<action>` is the directory name, e.g. `subaud-tools/tools-actions/fork-sync@v0.13.1`.
 Floating references (`@main`, `@v1`, no tag at all) are not supported and
 must not be used.
 

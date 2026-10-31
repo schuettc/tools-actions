@@ -28,10 +28,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with: { ref: "${{ inputs.tag }}" }
       - id: rel
-        uses: subaud-tools/tools-actions/release-version@v0.13.0
+        uses: subaud-tools/tools-actions/release-version@v0.13.1
         with: { mode: version-file, dispatch-tag: "${{ inputs.tag }}" }
       - if: steps.rel.outputs.skip != 'true'
-        uses: subaud-tools/tools-actions/go-release@v0.13.0
+        uses: subaud-tools/tools-actions/go-release@v0.13.1
         with:
           binaries: |
             kempt=./cmd/kempt
@@ -58,4 +58,4 @@ jobs:
           dl-distribution-id: E309WZW10YNEN
 ```
 
-A step that must run before the build (galley's wasm client) goes before `go-release`; files the release should carry beyond the tarballs (muster's Lambda zip) are written into `dist/` first and listed in `extra-assets`, which attaches them to the GitHub release and publishes them beside the tarballs on `/dl/<tool>/<version>/`.
+A step that must run before the build (galley's wasm client) goes before `go-release`; files the release should carry beyond the tarballs (muster's Lambda zip) are written into `dist/` first and listed in `extra-assets`, which attaches them to the GitHub release and publishes them beside the tarballs on `/dl/<tool>/<version>/`. An extra asset that also matches the tarball glob is selected once by its exact path for checksums, GitHub uploads and download-page copies.

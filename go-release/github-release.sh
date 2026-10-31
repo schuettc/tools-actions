@@ -12,6 +12,7 @@ if [ "${CREATE:-false}" = true ]; then
   [ "${PRERELEASE:-false}" = true ] && args+=(--prerelease)
   gh "${args[@]}"
 fi
-assets=(dist/*.tar.gz dist/*.tar.gz.sha256 dist/checksums.txt)
-for g in ${EXTRA_ASSETS:-}; do for f in $g; do assets+=("$f"); done; done
+# shellcheck source=go-release/assets.sh
+source "$(dirname "${BASH_SOURCE[0]}")/assets.sh"
+collect_assets dist/*.tar.gz dist/*.tar.gz.sha256 dist/checksums.txt
 gh release upload "$TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
