@@ -30,6 +30,26 @@ exit 0
 FAKE
   chmod +x "$W/bin/$t"
 done
+cat > "$W/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+echo "gh $*" >> "$W/calls"
+if [ "$1 $2" = "release upload" ]; then
+  shift 3
+  seen=()
+  for arg in "$@"; do
+    case "$arg" in dist/*)
+      for previous in ${seen[@]+"${seen[@]}"}; do
+        if [ "$arg" = "$previous" ]; then
+          echo "HTTP 422: ReleaseAsset.name already exists: $arg" >&2
+          exit 1
+        fi
+      done
+      seen+=("$arg")
+    esac
+  done
+fi
+FAKE
+export W
 export PATH="$W/bin:$PATH"
 
 # A tiny module whose binary prints the family version line.
@@ -149,6 +169,20 @@ check "PROMOTE=false never touches latest" '! grep -q "dl/demo/latest" "$W/calls
 : > "$W/calls"
 ( cd "$mod" && env DL_TOOL=demo BINARY_PREFIXES="demo" BUCKET=bkt VERSION=1.2.3 PROMOTE=false DISTRIBUTION_ID=EDIST bash "$A/publish-dl.sh" ) > "$W/log" 2>&1
 check "tarballs of every packaged binary go under the tool's path" 'grep -q "dl/demo/1.2.3/demo-deploy_linux_amd64.tar.gz" "$W/calls"'
+
+echo "== overlapping setup TAR extra"
+printf 'setup' > "$W/setup.toml"
+tar -C "$W" -czf "$mod/dist/demo_setup.tar.gz" setup.toml
+( cd "$mod" && env EXTRA_ASSETS='dist/demo_setup.tar.gz dist/*.zip' bash "$A/package.sh" ) > "$W/log" 2>&1; rc=$?
+check "overlapping TAR has exactly one aggregate checksum" '[ $rc -eq 0 ] && [ "$(grep -c "  demo_setup.tar.gz$" "$mod/dist/checksums.txt")" -eq 1 ] && [ "$(wc -l < "$mod/dist/checksums.txt")" -eq 10 ]'
+: > "$W/calls"
+( cd "$mod" && env TAG=v1.2.3 CREATE=false EXTRA_ASSETS='dist/demo_setup.tar.gz dist/*.zip' GITHUB_REPOSITORY=o/r bash "$A/github-release.sh" ) > "$W/log" 2>&1; rc=$?
+cat "$W/log"
+check "overlapping TAR uploads without duplicate argument HTTP422" '[ $rc -eq 0 ] && [ "$(grep "^gh release upload" "$W/calls" | tr " " "\n" | grep -cx "dist/demo_setup.tar.gz")" -eq 1 ]'
+: > "$W/calls"
+( cd "$mod" && env DL_TOOL=demo BUCKET=bkt VERSION=1.2.3 PROMOTE=false EXTRA_ASSETS='dist/demo_setup.tar.gz dist/*.zip' bash "$A/publish-dl.sh" ) > "$W/log" 2>&1; rc=$?
+check "overlapping TAR and sidecar each copied once" '[ $rc -eq 0 ] && [ "$(grep -c "^aws s3 cp dist/demo_setup.tar.gz " "$W/calls")" -eq 1 ] && [ "$(grep -c "^aws s3 cp dist/demo_setup.tar.gz.sha256 " "$W/calls")" -eq 1 ] && [ "$(grep -c "s3://bkt/dl/demo/1.2.3/" "$W/calls")" -eq 20 ]'
+check "setup sidecar verifies and rebuild does not promote" '( cd "$mod/dist" && shasum -a 256 -c demo_setup.tar.gz.sha256 >/dev/null ) && ! grep -q "latest" "$W/calls"'
 
 echo "== sign-setup and cleanup"
 ( env P12= GITHUB_ENV="$W/env" RUNNER_TEMP="$W" bash "$A/sign-setup.sh" ) > "$W/log" 2>&1; rc=$?

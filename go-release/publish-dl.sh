@@ -14,15 +14,14 @@ sum() { if command -v shasum >/dev/null; then shasum -a 256 "$@"; else sha256sum
 shopt -s nullglob
 files=(dist/*.tar.gz)
 [ ${#files[@]} -gt 0 ] || { echo "::error::go-release: no tarballs in dist/ to publish"; exit 1; }
-for g in ${EXTRA_ASSETS:-}; do
-  for f in $g; do
-    case "$f" in dist/*) ;; *) echo "::error::go-release: extra asset $f is not in dist/"; exit 1;; esac
-    ( cd dist && sum "$(basename "$f")" > "$(basename "$f").sha256" )
-    files+=("$f")
-  done
+# shellcheck source=go-release/assets.sh
+source "$(dirname "${BASH_SOURCE[0]}")/assets.sh"
+collect_assets "${files[@]}"
+for f in ${extras[@]+"${extras[@]}"}; do
+  ( cd dist && sum "$(basename "$f")" > "$(basename "$f").sha256" )
 done
 immutable='public,max-age=31536000,immutable'
-for f in "${files[@]}"; do
+for f in "${assets[@]}"; do
   base="$(basename "$f")"
   aws s3 cp "$f"        "s3://$BUCKET/dl/$DL_TOOL/$VERSION/$base"        --cache-control "$immutable"
   aws s3 cp "$f.sha256" "s3://$BUCKET/dl/$DL_TOOL/$VERSION/$base.sha256" --cache-control "$immutable" --content-type text/plain
